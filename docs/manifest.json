@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "stockholm-parking-source-of-truth",
+  "version": "1.0.0",
+  "compiled_at": "2026-05-07",
+  "compiled_by": "Claude (Opus 4.7)",
+  "scope": "Stockholm-first; cross-city extension documented",
+  "license_note": "All cited data is publicly published by Swedish authorities or news sources. Any system that re-publishes data should consult the original licence (Trafikkontoret data is generally CC0/open; STFS data is public-record).",
+
+  "files": [
+    {
+      "path": "README.md",
+      "purpose": "Index, freshness policy, reading order"
+    },
+    {
+      "path": "01-national-rules.md",
+      "purpose": "Trafikförordningen rules that apply everywhere in Sweden",
+      "primary_sources": [
+        "https://polisen.se/en/laws-and-regulations/fines/challenging-a-parking-fine/your-responsibility-as-driver-and-frequent-questions-and-answers/",
+        "https://www.transportstyrelsen.se/sv/vagtrafik/trafikregler/",
+        "https://korkortonline.se/en/theory/stop-park/",
+        "https://trafiko.se/en/faktabank/stannande-parkering",
+        "https://www.riksdagen.se/sv/dokument-och-lagar/dokument/svensk-forfattningssamling/lag-1976206-om-felparkeringsavgift_sfs-1976-206/"
+      ],
+      "volatility": "low",
+      "recommended_review_cadence": "yearly"
+    },
+    {
+      "path": "02-sign-grammar.md",
+      "purpose": "How to read Swedish parking signs (brackets, red days, plates, discs)",
+      "primary_sources": [
+        "https://trafiko.se/en/faktabank/stannande-parkering",
+        "https://www.thelocal.se/20200911/how-to-avoid-getting-too-many-parking-fines-in-sweden",
+        "https://korkortonline.se/en/theory/stop-park/"
+      ],
+      "volatility": "very_low",
+      "recommended_review_cadence": "every_2_years"
+    },
+    {
+      "path": "03-fines-and-disputes.md",
+      "purpose": "Stockholm fine tiers, dispute process, yellow vs white tickets",
+      "primary_sources": [
+        "https://parkering.stockholm/felparkering/parkeringsanmarkning/",
+        "https://www.transportstyrelsen.se/sv/vagtrafik/fordon/skatter-och-avgifter/parkeringsanmarkning/",
+        "https://polisen.se/en/laws-and-regulations/fines/challenging-a-parking-fine/",
+        "https://www.sthlmparkering.se/help",
+        "https://www.svt.se/nyheter/lokalt/stockholm/hojda-p-boter-i-stockholm-fran-den-1-april",
+        "https://www.transportstyrelsen.se/sv/om-oss/pressrum/nyhetsarkiv/2026/flest-felparkerare-finns-i-stockholm/",
+        "https://www.riksdagen.se/sv/dokument-och-lagar/dokument/svensk-forfattningssamling/forordning-19761128-om-felparkeringsavgift_sfs-1976-1128/"
+      ],
+      "key_facts": {
+        "stockholm_fine_tiers_sek": [900, 1100, 1300],
+        "national_min_max_sek": [75, 1300],
+        "reminder_surcharge_sek": 150,
+        "initial_payment_window_days": 8,
+        "reminder_window_days": 21,
+        "transportstyrelsen_per_ticket_fee_sek": 53,
+        "stockholm_2024_h1_tickets": 258884,
+        "sweden_2025_total_tickets": 1344147,
+        "sweden_2025_payouts_to_municipalities_msek": 975
+      },
+      "volatility": "medium",
+      "recommended_review_cadence": "quarterly"
+    },
+    {
+      "path": "04-stockholm-ltf-tolken-api.md",
+      "purpose": "Reference for openparking.stockholm.se/LTF-Tolken/v1/",
+      "primary_sources": [
+        "https://openparking.stockholm.se/Home/Parking",
+        "https://openparking.stockholm.se/Home/Data",
+        "https://openparking.stockholm.se/Home/Key",
+        "https://openstreetgs.stockholm.se/home/Guide/TutGetStarted",
+        "https://www.trafiklab.se/api/other-apis/stockholm-stad/"
+      ],
+      "endpoint_inventory": {
+        "base_url": "https://openparking.stockholm.se/LTF-Tolken/v1/",
+        "foreskrifter": ["servicedagar", "ptillaten", "pbuss", "plastbil", "pmotorcykel", "prorelsehindrad"],
+        "operations": ["all", "weekday/{weekday}", "area/{areaName}", "street/{streetName}", "within?radius=&lat=&lng=", "untilNextWeekday", "wfs"],
+        "auth": "apiKey query parameter; free, register at /Home/Key",
+        "formats": ["xml", "json"]
+      },
+      "volatility": "low",
+      "recommended_review_cadence": "yearly"
+    },
+    {
+      "path": "05-stockholm-datasets-inventory.md",
+      "purpose": "Full catalogue of parking, LTF, NVDB datasets including WMS/WFS-only layers",
+      "primary_sources": [
+        "https://openparking.stockholm.se/Home/Data",
+        "https://openparking.stockholm.se/Home/Gs",
+        "https://openparking.stockholm.se/Home/OgcApi",
+        "https://dataportalen.stockholm.se/dataportalen/"
+      ],
+      "key_layer_inventory": {
+        "wms_wfs_only_parking_layers": ["Boendeparkeringsområden", "Taxaområden", "Parkering förbjuden", "Ändamålsplats"],
+        "ltf_layers": ["LTFR_FORESKRIFT", "LTFR_FORESKRIFT_YTA", "LTFR_FORESKRIFT_GEOM"],
+        "nvdb_layers_for_10m_rule": ["Korsning", "GCM-passage", "Cirkulationsplats", "Hastighetsgräns", "Tättbebyggt område"]
+      },
+      "volatility": "low",
+      "recommended_review_cadence": "yearly"
+    },
+    {
+      "path": "06-stockholm-operators.md",
+      "purpose": "The 4-provider authorization system, permits, EV interaction",
+      "primary_sources": [
+        "https://www.easypark.com/en-se/where-to-park/parking-apps-in-stockholm",
+        "https://www.easypark.com/en-se/where-to-park/parking-in-stockholm",
+        "https://www.sthlmparkering.se/help",
+        "https://press.newsmachine.com/pressrelease/view/stockholm-justerar-parkeringsavgifter-40342",
+        "https://www.parkit.se/en/parkit-explains/parking-fine"
+      ],
+      "key_facts": {
+        "authorized_operators": ["EasyPark", "Parkster", "Mobill", "ePARK"],
+        "betala_p_discontinued_date": "2024-10-01",
+        "fee_parity_required": true,
+        "boendeparkering_monthly_sek_2024": 1600,
+        "nytto_a_yearly_sek_2024": 25000,
+        "nytto_b_yearly_sek_2024": 18750
+      },
+      "volatility": "medium",
+      "recommended_review_cadence": "quarterly"
+    },
+    {
+      "path": "07-cross-city-and-eu-extension.md",
+      "purpose": "STFS/RDT, DATEX II, EU regulation, city-onboarding playbook",
+      "primary_sources": [
+        "https://www.transportstyrelsen.se/sv/vagtrafik/trafikregler-och-vagmarken/trafikregler/stfs-for-myndigheter-som-beslutar-trafikforeskrifter/om-stfs/",
+        "https://rdt.transportstyrelsen.se/rdt/defaultstfs.aspx",
+        "https://www.transportstyrelsen.se/sv/vagtrafik/trafikregler-och-vagmarken/trafikregler/stfs-for-myndigheter-som-beslutar-trafikforeskrifter/grunderna-for-stfs/styrande-och-stodjande-dokument/",
+        "https://www.trafikverket.se/e-tjanster/hamta-data-fran-trafikverket/",
+        "https://www.trafiklab.se/",
+        "https://www.datex2.eu/"
+      ],
+      "volatility": "low",
+      "recommended_review_cadence": "yearly"
+    }
+  ],
+
+  "data_model_reference": {
+    "subdomains": ["geospatial", "regulation_graph", "operator_catalog", "user_session"],
+    "core_entities": {
+      "geospatial": ["RoadSegment", "ParkingArea", "Zone", "PointOfInterest"],
+      "regulation_graph": ["Regulation", "Rule", "TimeWindow", "AppliesTo", "HolidayCalendar"],
+      "operator_catalog": ["Operator", "OperatorZone", "Tariff", "Permit"],
+      "user_session": ["Vehicle", "ParkingSession", "RuleEvaluation", "FineEvent", "Notification"]
+    },
+    "design_principles": [
+      "Provenance on every regulation (source_id, source_ref, effective_from/to)",
+      "Day-types as first-class concept (HolidayCalendar per country/region)",
+      "RuleEvaluation cached with next-change-timestamp for sub-100ms geofence query",
+      "AppliesTo with offset_from/to for n-metre rules (10m, 20m, 30m)",
+      "Loose coupling between Zone (city-defined) and OperatorZone (provider-internal)"
+    ]
+  },
+
+  "extension_targets_priority": [
+    {"city": "Stockholm", "country": "SE", "status": "primary", "data_quality": "excellent"},
+    {"city": "Göteborg", "country": "SE", "status": "next-Sweden", "data_quality": "good_via_RDT"},
+    {"city": "Malmö", "country": "SE", "status": "next-Sweden", "data_quality": "good_via_RDT"},
+    {"city": "Oslo", "country": "NO", "status": "Nordic-expansion", "data_quality": "good_via_DATEX_II"},
+    {"city": "Copenhagen", "country": "DK", "status": "Nordic-expansion", "data_quality": "good_via_DATEX_II"},
+    {"city": "Helsinki", "country": "FI", "status": "Nordic-expansion", "data_quality": "good_via_Fintraffic"}
+  ],
+
+  "known_gaps": [
+    "Live regulation data (servicedagar, ptillaten records) requires API key from Trafikkontoret",
+    "Per-zone pricing is not in open data; must come from operators or scraping parkering.stockholm",
+    "Real-time spot occupancy is not exposed by Trafikkontoret as open data",
+    "Residential permit holders are personally identifiable and never published",
+    "Operator zone-ID mappings (EasyPark's zone X = which Stockholm Zone polygon) require partnership or scraping",
+    "Private-land Kontrollavgift parking has no central registry; coverage is fragmented per landlord",
+    "Sign images linked to LTF data: not currently provided; must be photographed or sourced separately"
+  ]
+}
