@@ -10,6 +10,11 @@ import (
 
 // RuleSource is the read interface the engine needs. Implemented by
 // the store layer in production and by in-memory fakes in tests.
+//
+// A RuleSource may also implement any of the optional sub-interfaces
+// declared in enricher.go (ZoneSource, TariffSource, OperatorSource,
+// HazardSource) to populate the corresponding Verdict fields. The
+// engine type-asserts and skips those a source does not support.
 type RuleSource interface {
 	// RulesNearby returns all rules whose applies-to geometry includes
 	// or comes within the given radius of the position. The store is
@@ -25,7 +30,15 @@ type Query struct {
 	Position domain.Coordinate
 	Vehicle  domain.Vehicle
 	At       time.Time
-	RadiusM  float64 // search radius for nearby rules; 0 means default (50m)
+	RadiusM  float64       // search radius for nearby rules; 0 means default (50m)
+	Duration time.Duration // optional desired stay; if > 0, EstimatedCost is populated
+}
+
+// scoredRule pairs a rule with the time windows that matched at the
+// query moment. Lifted to package level so enricher.go can use it.
+type scoredRule struct {
+	rule    domain.Rule
+	windows []domain.TimeWindow
 }
 
 // Evaluator computes a Verdict for a Query. It is stateless beyond
@@ -50,6 +63,9 @@ func New(src RuleSource, cal *HolidayCalendar) *Evaluator {
 //     permit/payment requirements produces an allow verdict.
 //  4. Compute ExpiresAt as the earliest moment any contributing rule
 //     could change disposition (next time-window boundary).
+//  5. Enrich the verdict with optional fields (Location, Pricing,
+//     Constraints, Warnings, EstimatedCost, Metadata) using whatever
+//     sub-interfaces the RuleSource implements.
 //
 // This is a deliberately simple kernel — the complexity is in the
 // regulation graph, not the walker. Future enhancements (conflict
@@ -75,11 +91,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 	tod := minutesOfDay(q.At)
 
 	// Filter to active, vehicle-relevant rules.
-	type scored struct {
-		rule    domain.Rule
-		windows []domain.TimeWindow // matched windows (for ExpiresAt computation)
-	}
-	var active []scored
+	var active []scoredRule
 	for _, r := range nearby {
 		if !r.MatchesVehicle(q.Vehicle) {
 			continue
@@ -88,7 +100,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 		if len(r.TimeWindows) > 0 && len(matched) == 0 {
 			continue
 		}
-		active = append(active, scored{rule: r, windows: matched})
+		active = append(active, scoredRule{rule: r, windows: matched})
 	}
 
 	sort.SliceStable(active, func(i, j int) bool {
@@ -110,7 +122,6 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 
 		switch s.rule.Kind {
 		case domain.RuleForbid:
-			reason.Supports = !verdict.Allowed
 			verdict.Allowed = false
 			reason.Supports = true
 			verdict.Reasons = append(verdict.Reasons, reason)
@@ -131,6 +142,9 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 			verdict.ExpiresAt = next
 		}
 	}
+
+	// Enrichment: optional fields populated when the source supports them.
+	e.enrich(ctx, q, &verdict, active)
 
 	return verdict, nil
 }
@@ -167,7 +181,6 @@ func inTimeRange(tod, start, end int) bool {
 // of the given windows begins or ends. Used to set Verdict.ExpiresAt
 // so the caller knows when to re-evaluate.
 func nextWindowBoundary(at time.Time, ws []domain.TimeWindow) time.Time {
-	tod := minutesOfDay(at)
 	var best time.Time
 	for _, w := range ws {
 		for _, m := range []int{w.StartMin, w.EndMin} {
@@ -179,7 +192,6 @@ func nextWindowBoundary(at time.Time, ws []domain.TimeWindow) time.Time {
 				best = candidate
 			}
 		}
-		_ = tod
 	}
 	return best
 }

@@ -19,12 +19,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 //
 // Query parameters:
 //
-//	lat    (required) — latitude in WGS84
-//	lng    (required) — longitude in WGS84
-//	plate  (required) — vehicle registration
-//	class  (optional) — vehicle class, default "car"
-//	at     (optional) — RFC3339 timestamp, defaults to server now
-//	radius (optional) — search radius in metres, default 50
+//	lat              (required) — latitude in WGS84
+//	lng              (required) — longitude in WGS84
+//	plate            (required) — vehicle registration
+//	class            (optional) — vehicle class, default "car"
+//	at               (optional) — RFC3339 timestamp, defaults to server now
+//	radius           (optional) — search radius in metres, default 50
+//	duration_minutes (optional) — desired stay; if provided, the
+//	                              response includes estimated_cost
 func (s *Server) handleAllowed(w http.ResponseWriter, r *http.Request) {
 	q, err := parseAllowedQuery(r)
 	if err != nil {
@@ -79,11 +81,21 @@ func parseAllowedQuery(r *http.Request) (engine.Query, error) {
 		radius = r
 	}
 
+	var duration time.Duration
+	if s := v.Get("duration_minutes"); s != "" {
+		m, err := strconv.Atoi(s)
+		if err != nil || m < 0 {
+			return engine.Query{}, errors.New("invalid duration_minutes")
+		}
+		duration = time.Duration(m) * time.Minute
+	}
+
 	return engine.Query{
 		Position: domain.Coordinate{Lat: lat, Lng: lng},
 		Vehicle:  domain.Vehicle{Plate: plate, Class: class},
 		At:       at,
 		RadiusM:  radius,
+		Duration: duration,
 	}, nil
 }
 

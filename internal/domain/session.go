@@ -19,11 +19,24 @@ type ParkingSession struct {
 
 // Verdict is the answer to "is parking allowed here right now?". It is
 // what the engine returns and what the HTTP API exposes.
+//
+// The first block of fields (Allowed..NeedsAction) is the core verdict.
+// The remaining fields are optional enrichment populated by the engine
+// when an enriching source is available; they are all omitempty so a
+// minimally-configured server still returns a valid, smaller payload.
 type Verdict struct {
 	Allowed     bool      `json:"allowed"`
 	ExpiresAt   time.Time `json:"expires_at"`             // earliest moment the verdict could change
 	Reasons     []Reason  `json:"reasons"`                // contributing rules, supportive and contrary
 	NeedsAction []string  `json:"needs_action,omitempty"` // e.g. ["pay_via_app", "show_disc"]
+
+	// Enrichment.
+	Location      *LocationInfo `json:"location,omitempty"`
+	Pricing       *PricingInfo  `json:"pricing,omitempty"`
+	Constraints   *Constraints  `json:"constraints,omitempty"`
+	Warnings      []Warning     `json:"warnings,omitempty"`
+	EstimatedCost *CostEstimate `json:"estimated_cost,omitempty"`
+	Metadata      *Metadata     `json:"metadata,omitempty"`
 }
 
 // Reason links a Verdict back to the rules that produced it. The

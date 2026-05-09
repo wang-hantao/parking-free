@@ -73,10 +73,20 @@ make run
 # In another terminal:
 curl http://localhost:8080/healthz
 curl 'http://localhost:8080/allowed?lat=59.32784&lng=18.05306&plate=ABC123'
+
+# With duration to get an estimated_cost block in the response:
+curl 'http://localhost:8080/allowed?lat=59.32784&lng=18.05306&plate=ABC123&duration_minutes=120'
 ```
 
 The `/allowed` endpoint will return a stub response until ingestion
-is wired up. To run actual ingestion against LTF-Tolken:
+is wired up. Once tariff and zone data are populated by the ingester,
+the response includes `location`, `pricing` (current rate, next change,
+operator deeplinks), `constraints` (max stay, payment/permit needs),
+`warnings` (servicedag upcoming, near-junction, etc.), and — when
+`duration_minutes` is supplied — `estimated_cost` with a per-window
+breakdown.
+
+To run actual ingestion against LTF-Tolken:
 
 ```bash
 # After setting STOCKHOLM_API_KEY in .env
