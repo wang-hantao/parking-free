@@ -100,7 +100,29 @@ make test
 ```
 
 The engine and holiday calendar have unit tests and don't require the
-database or any external API.
+database or any external API. They cover the rule walker (vehicle-class
+filtering, time windows, priority ordering, permit lookup, May 1
+holiday) and the enrichment pipeline (location, pricing across rate
+boundaries, operator deeplink expansion, cost estimation across the
+free/paid cutoff).
+
+### Postgres integration tests
+
+The `internal/store/postgres` package has integration tests against a
+real Postgres + PostGIS instance. They are skipped automatically when
+`POSTGRES_TEST_DSN` is unset, so they don't break `make test` for
+people without a local database.
+
+To run them:
+
+```bash
+make docker-up && make migrate
+export POSTGRES_TEST_DSN='postgres://parking:parking@localhost:5432/parking?sslmode=disable'
+go test ./internal/store/postgres/...
+```
+
+The tests are destructive — they truncate all relevant tables before
+running. Don't point `POSTGRES_TEST_DSN` at a database with real data.
 
 ## Extending to a new city
 

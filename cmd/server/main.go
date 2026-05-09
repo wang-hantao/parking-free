@@ -11,6 +11,7 @@ import (
 	"github.com/wang-hantao/parking-free/internal/config"
 	"github.com/wang-hantao/parking-free/internal/engine"
 	httpapi "github.com/wang-hantao/parking-free/internal/http"
+	"github.com/wang-hantao/parking-free/internal/store/postgres"
 )
 
 func main() {
@@ -22,10 +23,26 @@ func main() {
 
 	logger := newLogger(cfg.Logging)
 
-	// For now we wire the engine against a no-op rule source. Once the
-	// store is implemented (see internal/store/postgres), swap this to
-	// use postgres.Open and pass the Store as the engine's RuleSource.
-	src := emptyRuleSource{}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Resolve a RuleSource: postgres when configured, empty otherwise.
+	// The empty source lets the server start cleanly for development
+	// even before the database is reachable.
+	var src engine.RuleSource = emptyRuleSource{}
+	if cfg.Postgres.DSN != "" {
+		pg, err := postgres.Open(ctx, cfg.Postgres.DSN)
+		if err != nil {
+			logger.Warn("postgres unavailable, using empty source", "err", err)
+		} else {
+			defer pg.Close()
+			src = pg
+			logger.Info("using postgres rule source", "dsn_present", true)
+		}
+	} else {
+		logger.Info("PG_DSN not set, using empty rule source")
+	}
+
 	cal := engine.NewHolidayCalendarSE()
 	ev := engine.New(src, cal)
 
@@ -34,9 +51,6 @@ func main() {
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 	}, logger, ev)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("server stopped with error", "err", err)
