@@ -102,11 +102,15 @@ LIMIT 1`
 
 // --- Enrichment: tariffs ------------------------------------------------
 
-// v1 returns one open-ended TariffWindow per tariff active for the
-// position's zone. Future schema changes will add weekday/time-of-day
-// columns to tariff so the store can return real per-window pricing.
+// v1 returns one open-ended TariffWindow per distinct tariff active
+// for the position's zone. DISTINCT collapses the case where multiple
+// authorised operators (Stockholm parity model) carry identical
+// tariffs — without it, the engine sees them as separate windows and
+// emits a spurious next_rate_change. Future schema changes will add
+// weekday/time-of-day columns to tariff so the store can return real
+// per-window pricing.
 const sqlTariffsAt = `
-SELECT t.currency, t.rate_per_unit::float8, t.time_unit_s, t.max_session_cost::float8
+SELECT DISTINCT t.currency, t.rate_per_unit::float8, t.time_unit_s, t.max_session_cost::float8
 FROM tariff t
 JOIN operator_zone oz ON oz.id = t.operator_zone_id
 JOIN zone z ON z.id = oz.maps_to_zone_id

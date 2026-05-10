@@ -64,6 +64,11 @@ docker compose up -d
 # Apply migrations (uses psql in the container)
 make migrate
 
+# Optional: seed a small demo dataset (one zone in central Stockholm,
+# the four authorised operators, a 25 SEK/hour tariff, and a paid-
+# parking rule) so /allowed returns a fully enriched response.
+make seed
+
 # Copy the example env and edit
 cp .env.example .env
 
@@ -72,19 +77,19 @@ make run
 
 # In another terminal:
 curl http://localhost:8080/healthz
-curl 'http://localhost:8080/allowed?lat=59.32784&lng=18.05306&plate=ABC123'
+curl 'http://localhost:8080/allowed?lat=59.3330&lng=18.0681&plate=ABC123'
 
 # With duration to get an estimated_cost block in the response:
-curl 'http://localhost:8080/allowed?lat=59.32784&lng=18.05306&plate=ABC123&duration_minutes=120'
+curl 'http://localhost:8080/allowed?lat=59.3330&lng=18.0681&plate=ABC123&duration_minutes=180'
 ```
 
-The `/allowed` endpoint will return a stub response until ingestion
-is wired up. Once tariff and zone data are populated by the ingester,
-the response includes `location`, `pricing` (current rate, next change,
-operator deeplinks), `constraints` (max stay, payment/permit needs),
-`warnings` (servicedag upcoming, near-junction, etc.), and — when
-`duration_minutes` is supplied — `estimated_cost` with a per-window
-breakdown.
+The `/allowed` endpoint will return a default-allow response with no
+enrichment fields when the database is empty. Run `make seed` to load
+the Stureplan demo dataset and see the full response shape — including
+`location`, `pricing` (current rate, operator deeplinks),
+`constraints` (max stay, payment required), `warnings` (max stay
+expiring), and — when `duration_minutes` is supplied — `estimated_cost`
+with a per-window breakdown.
 
 To run actual ingestion against LTF-Tolken:
 

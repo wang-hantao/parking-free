@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: parking
       POSTGRES_DB: parking
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - parking-free-pgdata:/var/lib/postgresql/data
     healthcheck:
