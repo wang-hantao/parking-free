@@ -140,11 +140,173 @@ func TestTransform_Servicedagar_WeekdayVariation(t *testing.T) {
 }
 
 func TestTransform_OtherForeskrifter_ReturnSchemaPending(t *testing.T) {
-	for _, f := range []Foreskrift{PTillaten, PBuss, PLastbil, PMotorcykel, PRorelsehindrad} {
+	for _, f := range []Foreskrift{PBuss, PLastbil, PMotorcykel, PRorelsehindrad} {
 		_, err := Transform(f, []byte(`{"type":"FeatureCollection","features":[]}`))
 		if !errors.Is(err, ErrSchemaPending) {
 			t.Errorf("%s: expected ErrSchemaPending, got %v", f, err)
 		}
+	}
+}
+
+func TestTransform_Ptillaten_RealSample(t *testing.T) {
+	raw := loadFixture(t, "ptillaten_sample.json")
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	// 5 features → 5 road segments.
+	if got := len(batch.RoadSegments); got != 5 {
+		t.Errorf("road segments: want 5, got %d", got)
+	}
+	// 4 distinct CITATIONs in the sample (FID 25 and 26 share one).
+	if got := len(batch.Regulations); got != 4 {
+		t.Errorf("regulations: want 4 (FID 25 and 26 share citation), got %d", got)
+	}
+	// 5 rules, one per feature.
+	if got := len(batch.Rules); got != 5 {
+		t.Errorf("rules: want 5, got %d", got)
+	}
+}
+
+func TestTransform_Ptillaten_MidnightCrossingWindow(t *testing.T) {
+	// Feature FID 14: START_TIME=600, END_TIME=0, START_WEEKDAY=fredag.
+	// Should become "Friday 06:00 to midnight" (360 to 1440), not 360 to 0.
+	raw := loadFixture(t, "ptillaten_sample.json")
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var found *domain.Rule
+	for i := range batch.Rules {
+		if batch.Rules[i].AppliesTo[0].TargetID == "ptillaten/14/3" {
+			found = &batch.Rules[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("FID 14 rule not found")
+	}
+	if len(found.TimeWindows) != 1 {
+		t.Fatalf("expected 1 time window, got %d", len(found.TimeWindows))
+	}
+	tw := found.TimeWindows[0]
+	if tw.WeekdayMask != 32 {
+		t.Errorf("weekday mask: want 32 (fredag), got %d", tw.WeekdayMask)
+	}
+	if tw.StartMin != 360 {
+		t.Errorf("start min: want 360 (06:00), got %d", tw.StartMin)
+	}
+	if tw.EndMin != 1440 {
+		t.Errorf("end min: want 1440 (end of day), got %d", tw.EndMin)
+	}
+}
+
+func TestTransform_Ptillaten_PaidWithVfPlatstyp(t *testing.T) {
+	// "P Avgift, boende" → NeedsPayment=true, NeedsPermit=false.
+	raw := loadFixture(t, "ptillaten_sample.json")
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var found *domain.Rule
+	for i := range batch.Rules {
+		if batch.Rules[i].AppliesTo[0].TargetID == "ptillaten/14/3" {
+			found = &batch.Rules[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("FID 14 rule not found")
+	}
+	if !found.NeedsPayment {
+		t.Errorf("NeedsPayment: want true for 'P Avgift, boende'")
+	}
+	if found.NeedsPermit {
+		t.Errorf("NeedsPermit: want false for 'P Avgift, boende' (paid, anyone can park)")
+	}
+	if found.Kind != domain.RuleAllow {
+		t.Errorf("Kind: want allow, got %s", found.Kind)
+	}
+}
+
+func TestTransform_Ptillaten_DisabledSpot_NeedsPermit_AppliesAllDay(t *testing.T) {
+	// FID 27: VEHICLE=rörelsehindrade, no time fields.
+	// → NeedsPermit=true, 24/7 time window.
+	raw := loadFixture(t, "ptillaten_sample.json")
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var found *domain.Rule
+	for i := range batch.Rules {
+		if batch.Rules[i].AppliesTo[0].TargetID == "ptillaten/27/1" {
+			found = &batch.Rules[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("FID 27 rule not found")
+	}
+	if !found.NeedsPermit {
+		t.Errorf("NeedsPermit: want true for disabled-reserved spot")
+	}
+	if len(found.TimeWindows) != 1 {
+		t.Fatalf("expected 1 time window")
+	}
+	tw := found.TimeWindows[0]
+	if tw.WeekdayMask != 127 {
+		t.Errorf("weekday mask: want 127 (all days, 24/7), got %d", tw.WeekdayMask)
+	}
+	if tw.StartMin != 0 || tw.EndMin != 1440 {
+		t.Errorf("time range: want [0, 1440), got [%d, %d)", tw.StartMin, tw.EndMin)
+	}
+}
+
+func TestTransform_Ptillaten_PriorityBelowServicedagar(t *testing.T) {
+	// Ptillaten rules should have lower priority than servicedagar
+	// so that on overlap, the cleaning Forbid wins.
+	pRaw := loadFixture(t, "ptillaten_sample.json")
+	pBatch, _ := Transform(PTillaten, pRaw)
+	sRaw := loadFixture(t, "servicedagar_sample.json")
+	sBatch, _ := Transform(Servicedagar, sRaw)
+
+	if len(pBatch.Rules) == 0 || len(sBatch.Rules) == 0 {
+		t.Fatalf("missing rules")
+	}
+	if pBatch.Rules[0].Priority >= sBatch.Rules[0].Priority {
+		t.Errorf("ptillaten priority (%d) must be < servicedagar priority (%d)",
+			pBatch.Rules[0].Priority, sBatch.Rules[0].Priority)
+	}
+}
+
+func TestBuildTimeWindow_AllAbsent_Is247(t *testing.T) {
+	tw := buildTimeWindow("", 0, 0)
+	if tw.WeekdayMask != 127 {
+		t.Errorf("weekday mask: want 127, got %d", tw.WeekdayMask)
+	}
+	if tw.StartMin != 0 || tw.EndMin != 1440 {
+		t.Errorf("range: want [0, 1440), got [%d, %d)", tw.StartMin, tw.EndMin)
+	}
+}
+
+func TestBuildTimeWindow_EndZeroMeansEndOfDay(t *testing.T) {
+	// END_TIME=0 with START_TIME>0 is "to midnight" not "to 00:00 today".
+	tw := buildTimeWindow("fredag", 600, 0)
+	if tw.StartMin != 360 || tw.EndMin != 1440 {
+		t.Errorf("want [360, 1440), got [%d, %d)", tw.StartMin, tw.EndMin)
+	}
+}
+
+func TestBuildTimeWindow_NormalRange(t *testing.T) {
+	// Servicedagar-style: 00:00 to 06:00 on Friday.
+	tw := buildTimeWindow("fredag", 0, 600)
+	if tw.WeekdayMask != 32 {
+		t.Errorf("mask: want 32, got %d", tw.WeekdayMask)
+	}
+	if tw.StartMin != 0 || tw.EndMin != 360 {
+		t.Errorf("range: want [0, 360), got [%d, %d)", tw.StartMin, tw.EndMin)
 	}
 }
 

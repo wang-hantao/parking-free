@@ -114,10 +114,10 @@ real cleaning-window enforcement: a verdict of `allowed: false` if you
 query a position on a road segment during its weekly servicedag, with
 the contributing rule and the citation URL surfaced in `reasons`.
 
-`ptillaten`, `pbuss`, `plastbil`, `pmotorcykel`, and `prorelsehindrad`
-return `ErrSchemaPending` until their JSON schemas are captured and
-modelled — capture and share a sample of each via `ingester dump` to
-extend the transform.
+`pbuss`, `plastbil`, `pmotorcykel`, and `prorelsehindrad` return
+`ErrSchemaPending` until their JSON schemas are captured and modelled —
+capture and share a sample of each via `ingester dump` to extend the
+transform.
 
 ### Schema inspection
 

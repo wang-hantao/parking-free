@@ -42,7 +42,9 @@ func Transform(f Foreskrift, raw []byte) (*IngestBatch, error) {
 	switch f {
 	case Servicedagar:
 		return transformServicedagar(fc), nil
-	case PTillaten, PBuss, PLastbil, PMotorcykel, PRorelsehindrad:
+	case PTillaten:
+		return transformPTillaten(fc), nil
+	case PBuss, PLastbil, PMotorcykel, PRorelsehindrad:
 		return nil, fmt.Errorf("%w: %s schema not yet captured; run `ingester dump <dir> %s` and share the sample so transform can be written", ErrSchemaPending, f, f)
 	default:
 		return nil, fmt.Errorf("stockholm: unknown foreskrift %q", f)
@@ -142,23 +144,116 @@ func transformServicedagar(fc featureCollection) *IngestBatch {
 		}
 
 		// Rule: forbid parking during the cleaning window.
-		startMin := hhmmToMin(propInt(props, "START_TIME"))
-		endMin := hhmmToMin(propInt(props, "END_TIME"))
+		startHHMM := propInt(props, "START_TIME")
+		endHHMM := propInt(props, "END_TIME")
 		weekday := propStr(props, "START_WEEKDAY")
-		mask := weekdayMask(weekday)
 
 		batch.Rules = append(batch.Rules, domain.Rule{
 			RegulationID: citation, // placeholder; ingester resolves to UUID
 			Kind:         domain.RuleForbid,
 			Priority:     10, // servicedagar are strict, take precedence
-			TimeWindows: []domain.TimeWindow{{
-				WeekdayMask: mask,
-				StartMin:    startMin,
-				EndMin:      endMin,
-			}},
+			TimeWindows:  []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
 			AppliesTo: []domain.AppliesTo{{
 				Kind:     domain.TargetRoadSegment,
 				TargetID: segRef, // placeholder; ingester resolves to UUID
+			}},
+		})
+	}
+
+	return batch
+}
+
+// =============================================================================
+// Ptillaten (parking permitted)
+// =============================================================================
+
+// transformPTillaten converts each feature into:
+//   - one RoadSegment record (per feature)
+//   - one Regulation (deduplicated by CITATION)
+//   - one Rule of kind=allow with the permitted-parking window
+//
+// Properties driving rule semantics:
+//
+//   - VEHICLE: "fordon" = generic vehicles; "rörelsehindrade" = disabled
+//   - VF_PLATS_TYP: free-text describing the space type. Substring tests:
+//     "Avgift" → NeedsPayment, "rörelsehindrad" → NeedsPermit
+//   - START_TIME / END_TIME / START_WEEKDAY: optional. Missing → 24/7.
+//
+// Priority is 5, below servicedagar's 10 — when cleaning and parking-
+// permitted windows overlap on the same road segment, the Forbid wins.
+//
+// v1 limitation: NeedsPermit doesn't distinguish disabled-only from
+// residential-only. The engine treats any valid permit as satisfying
+// any NeedsPermit rule. Tightening this requires adding
+// RequiredPermitKind to domain.Rule — out of scope here.
+func transformPTillaten(fc featureCollection) *IngestBatch {
+	batch := &IngestBatch{}
+	regSeen := map[string]bool{}
+
+	for _, feat := range fc.Features {
+		props := feat.Properties
+
+		citation := propStr(props, "CITATION")
+		fid := propInt(props, "FID")
+		extentNo := propInt(props, "EXTENT_NO")
+		if citation == "" || fid == 0 {
+			continue
+		}
+
+		if feat.Geometry.Type != "LineString" {
+			continue
+		}
+		var coords [][]float64
+		if err := json.Unmarshal(feat.Geometry.Coordinates, &coords); err != nil || len(coords) < 2 {
+			continue
+		}
+
+		segRef := fmt.Sprintf("ptillaten/%d/%d", fid, extentNo)
+
+		batch.RoadSegments = append(batch.RoadSegments, domain.RoadSegment{
+			Source:       domain.Source{System: SourceSystem, Reference: segRef},
+			StreetName:   propStr(props, "STREET_NAME"),
+			Municipality: "Stockholm",
+			GeometryWKT:  linestringWKT(coords),
+		})
+
+		if !regSeen[citation] {
+			regSeen[citation] = true
+			var validFrom time.Time
+			if vfStr := propStr(props, "VALID_FROM"); vfStr != "" {
+				if t, err := time.Parse(time.RFC3339, vfStr); err == nil {
+					validFrom = t
+				}
+			}
+			batch.Regulations = append(batch.Regulations, domain.Regulation{
+				Source:            domain.Source{System: SourceSystem, Reference: citation},
+				DecisionAuthority: "Stockholms stad",
+				Language:          "sv-SE",
+				EffectiveFrom:     validFrom,
+			})
+		}
+
+		// Payment / permit semantics from VF_PLATS_TYP and VEHICLE.
+		typ := strings.ToLower(propStr(props, "VF_PLATS_TYP"))
+		vehicle := strings.ToLower(propStr(props, "VEHICLE"))
+		needsPayment := strings.Contains(typ, "avgift")
+		needsPermit := strings.Contains(typ, "rörelsehindrad") ||
+			strings.Contains(vehicle, "rörelsehindrad")
+
+		startHHMM := propInt(props, "START_TIME")
+		endHHMM := propInt(props, "END_TIME")
+		weekday := propStr(props, "START_WEEKDAY")
+
+		batch.Rules = append(batch.Rules, domain.Rule{
+			RegulationID: citation, // placeholder
+			Kind:         domain.RuleAllow,
+			Priority:     5, // lower than servicedagar (10), so cleaning wins on overlap
+			NeedsPayment: needsPayment,
+			NeedsPermit:  needsPermit,
+			TimeWindows:  []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
+			AppliesTo: []domain.AppliesTo{{
+				Kind:     domain.TargetRoadSegment,
+				TargetID: segRef, // placeholder
 			}},
 		})
 	}
@@ -204,6 +299,34 @@ func hhmmToMin(hhmm int) int {
 		return 1440
 	}
 	return (hhmm/100)*60 + (hhmm % 100)
+}
+
+// buildTimeWindow constructs a TimeWindow from raw LTF properties.
+// Handles three real cases observed in the data:
+//
+//  1. All three values absent (weekday empty, both times 0): the rule
+//     applies 24/7. Returns mask=127, [0, 1440).
+//  2. END_TIME=0 with START_TIME>0: this is "end of day" semantics,
+//     not "start of day". E.g. ptillaten {600, 0, fredag} means
+//     "Friday 06:00 to midnight" — converted to [360, 1440).
+//  3. Normal: e.g. servicedagar {0, 600, fredag} → [0, 360).
+//
+// The TimeWindow output is what the engine's matchingWindows() will
+// then filter by weekday bit and time-of-day range.
+func buildTimeWindow(weekday string, startHHMM, endHHMM int) domain.TimeWindow {
+	if weekday == "" && startHHMM == 0 && endHHMM == 0 {
+		return domain.TimeWindow{WeekdayMask: 127, StartMin: 0, EndMin: 1440}
+	}
+	startMin := hhmmToMin(startHHMM)
+	endMin := hhmmToMin(endHHMM)
+	if endHHMM == 0 && startHHMM > 0 {
+		endMin = 1440
+	}
+	return domain.TimeWindow{
+		WeekdayMask: weekdayMask(weekday),
+		StartMin:    startMin,
+		EndMin:      endMin,
+	}
 }
 
 // weekdayMask maps a Swedish weekday name to a single-bit mask
