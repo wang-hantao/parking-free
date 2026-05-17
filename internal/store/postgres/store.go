@@ -331,12 +331,14 @@ func indexOf(s, sub string) int {
 // =============================================================================
 
 // UpsertRegulations idempotently writes regulations, keyed on
-// (source_system, source_reference). Returns nil on no-op input.
-func (s *Store) UpsertRegulations(ctx context.Context, regs []domain.Regulation) error {
+// (source_system, source_reference). Returns a map source_reference ->
+// generated UUID for cross-record resolution by callers.
+func (s *Store) UpsertRegulations(ctx context.Context, regs []domain.Regulation) (map[string]string, error) {
+	ids := make(map[string]string, len(regs))
 	if len(regs) == 0 {
-		return nil
+		return ids, nil
 	}
-	return s.inTx(ctx, func(tx pgx.Tx) error {
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		for _, r := range regs {
 			id := r.ID
 			if id == "" {
@@ -350,16 +352,59 @@ func (s *Store) UpsertRegulations(ctx context.Context, regs []domain.Regulation)
 			if lang == "" {
 				lang = "sv-SE"
 			}
-			var returnedID string
+			var returnedID, returnedRef string
 			if err := tx.QueryRow(ctx, sqlUpsertRegulation,
 				id, r.Source.System, r.Source.Reference, r.DecisionAuthority,
 				lang, r.EffectiveFrom, effectiveTo,
-			).Scan(&returnedID); err != nil {
+			).Scan(&returnedID, &returnedRef); err != nil {
 				return fmt.Errorf("upsert regulation %s/%s: %w", r.Source.System, r.Source.Reference, err)
 			}
+			ids[returnedRef] = returnedID
 		}
 		return nil
 	})
+	return ids, err
+}
+
+// UpsertRoadSegments writes road geometries from an external source,
+// idempotent on (source_system, source_reference). Returns a map
+// source_reference -> generated UUID so callers can resolve Rule
+// AppliesTo targets.
+func (s *Store) UpsertRoadSegments(ctx context.Context, segs []domain.RoadSegment) (map[string]string, error) {
+	ids := make(map[string]string, len(segs))
+	if len(segs) == 0 {
+		return ids, nil
+	}
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		for _, seg := range segs {
+			if seg.GeometryWKT == "" {
+				return fmt.Errorf("road segment %s: missing GeometryWKT", seg.Source.Reference)
+			}
+			if seg.Source.System == "" || seg.Source.Reference == "" {
+				return fmt.Errorf("road segment: Source.System and Source.Reference are required")
+			}
+			var street, direction any
+			if seg.StreetName != "" {
+				street = seg.StreetName
+			}
+			if seg.Direction != "" {
+				direction = seg.Direction
+			}
+			muni := seg.Municipality
+			if muni == "" {
+				muni = "Unknown"
+			}
+			var returnedID, returnedRef string
+			if err := tx.QueryRow(ctx, sqlUpsertRoadSegment,
+				street, muni, direction, seg.Source.System, seg.Source.Reference, seg.GeometryWKT,
+			).Scan(&returnedID, &returnedRef); err != nil {
+				return fmt.Errorf("upsert road segment %s/%s: %w", seg.Source.System, seg.Source.Reference, err)
+			}
+			ids[returnedRef] = returnedID
+		}
+		return nil
+	})
+	return ids, err
 }
 
 // UpsertRules destructively replaces all rules for the regulation IDs

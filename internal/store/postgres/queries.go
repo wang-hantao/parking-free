@@ -128,6 +128,9 @@ ORDER BY o.name`
 
 // --- Upserts ------------------------------------------------------------
 
+// UpsertRegulation: idempotent on (source_system, source_reference).
+// Returns the generated UUID along with the source_reference so the
+// caller can build a map[source_ref]uuid for cross-record resolution.
 const sqlUpsertRegulation = `
 INSERT INTO regulation
   (id, source_system, source_reference, decision_authority,
@@ -139,7 +142,22 @@ ON CONFLICT (source_system, source_reference) DO UPDATE SET
   effective_from = EXCLUDED.effective_from,
   effective_to = EXCLUDED.effective_to,
   updated_at = NOW()
-RETURNING id::text`
+RETURNING id::text, source_reference`
+
+// UpsertRoadSegment: idempotent on the partial unique index over
+// (source_system, source_reference) WHERE source_reference IS NOT NULL.
+// Geometry is provided as WGS84 WKT.
+const sqlUpsertRoadSegment = `
+INSERT INTO road_segment
+  (street_name, municipality, direction, source_system, source_reference, geom)
+VALUES ($1, $2, $3, $4, $5, ST_GeomFromText($6, 4326))
+ON CONFLICT (source_system, source_reference) WHERE source_reference IS NOT NULL DO UPDATE SET
+  street_name = EXCLUDED.street_name,
+  municipality = EXCLUDED.municipality,
+  direction = EXCLUDED.direction,
+  geom = EXCLUDED.geom,
+  updated_at = NOW()
+RETURNING id::text, source_reference`
 
 // UpsertRules is destructive per regulation: delete existing rules for
 // each affected regulation, then insert. Children (time_windows,

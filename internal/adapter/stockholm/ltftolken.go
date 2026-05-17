@@ -70,6 +70,20 @@ func (c *Client) FetchWithin(ctx context.Context, f Foreskrift, lat, lng float64
 	return c.get(ctx, fmt.Sprintf("/%s/within", f), q)
 }
 
+// FetchSample is like FetchWithin but caps results at maxFeatures.
+// Intended for schema inspection and debugging: small payloads, fast
+// turnaround. Production ingestion uses FetchAll instead.
+func (c *Client) FetchSample(ctx context.Context, f Foreskrift, lat, lng float64, radiusM, maxFeatures int) ([]byte, error) {
+	q := url.Values{}
+	q.Set("lat", strconv.FormatFloat(lat, 'f', 6, 64))
+	q.Set("lng", strconv.FormatFloat(lng, 'f', 6, 64))
+	q.Set("radius", strconv.Itoa(radiusM))
+	if maxFeatures > 0 {
+		q.Set("maxFeatures", strconv.Itoa(maxFeatures))
+	}
+	return c.get(ctx, fmt.Sprintf("/%s/within", f), q)
+}
+
 // FetchUntilNextWeekday calls the servicedagar /untilNextWeekday endpoint.
 // Only applicable to Servicedagar.
 func (c *Client) FetchUntilNextWeekday(ctx context.Context) ([]byte, error) {

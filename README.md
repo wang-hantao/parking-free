@@ -94,9 +94,47 @@ with a per-window breakdown.
 To run actual ingestion against LTF-Tolken:
 
 ```bash
-# After setting STOCKHOLM_API_KEY in .env
-make ingest
+# After setting STOCKHOLM_API_KEY in .env, and after `make migrate`
+# has applied migrations/0005 which adds geometry provenance indexes:
+make ingest                    # all six föreskrifter
+go run ./cmd/ingester servicedagar  # just one
 ```
+
+The ingester:
+
+1. Fetches the full JSON for each föreskrift via LTF-Tolken's `/all`
+   endpoint.
+2. Transforms into a batch of `RoadSegment` + `Regulation` + `Rule`
+   records, with placeholder source-refs in cross-record fields.
+3. Upserts road segments, then regulations, then resolves placeholders
+   to UUIDs, then upserts rules.
+
+After ingesting `servicedagar`, the `/allowed` endpoint will return
+real cleaning-window enforcement: a verdict of `allowed: false` if you
+query a position on a road segment during its weekly servicedag, with
+the contributing rule and the citation URL surfaced in `reasons`.
+
+`ptillaten`, `pbuss`, `plastbil`, `pmotorcykel`, and `prorelsehindrad`
+return `ErrSchemaPending` until their JSON schemas are captured and
+modelled — capture and share a sample of each via `ingester dump` to
+extend the transform.
+
+### Schema inspection
+
+The LTF-Tolken JSON response shape isn't publicly documented. Before
+implementing or revising `internal/adapter/stockholm/transform.go`,
+capture a small sample with the built-in `dump` subcommand:
+
+```bash
+# Captures ~5 features per föreskrift into ./samples/ (Stureplan, 2km radius)
+go run ./cmd/ingester dump ./samples
+
+# Or just one föreskrift:
+go run ./cmd/ingester dump ./samples servicedagar
+```
+
+`dump` requires only `STOCKHOLM_API_KEY`, not `PG_DSN` — it writes raw
+JSON to disk and exits without touching the database.
 
 ## Tests
 

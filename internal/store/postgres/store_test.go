@@ -105,7 +105,7 @@ func TestUpsertAndQuery_RoundTrip(t *testing.T) {
 		Language:          "sv-SE",
 		EffectiveFrom:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
-	if err := st.UpsertRegulations(ctx, []domain.Regulation{reg}); err != nil {
+	if _, err := st.UpsertRegulations(ctx, []domain.Regulation{reg}); err != nil {
 		t.Fatalf("upsert reg: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestRulesNearby_RadiusFiltering(t *testing.T) {
 		Source:        domain.Source{System: "test", Reference: "reg-radius"},
 		EffectiveFrom: time.Now(),
 	}
-	if err := st.UpsertRegulations(ctx, []domain.Regulation{reg}); err != nil {
+	if _, err := st.UpsertRegulations(ctx, []domain.Regulation{reg}); err != nil {
 		t.Fatalf("upsert reg: %v", err)
 	}
 	var regID string
@@ -226,7 +226,7 @@ func TestRulesNearby_OffsetExtendsRadius(t *testing.T) {
 	}
 
 	reg := domain.Regulation{Source: domain.Source{System: "test", Reference: "reg-offset"}, EffectiveFrom: time.Now()}
-	if err := st.UpsertRegulations(ctx, []domain.Regulation{reg}); err != nil {
+	if _, err := st.UpsertRegulations(ctx, []domain.Regulation{reg}); err != nil {
 		t.Fatalf("upsert reg: %v", err)
 	}
 	var regID string
@@ -284,7 +284,7 @@ func TestUpsertRules_DestructiveReplace(t *testing.T) {
 	zoneID := seedZone(t, st, 18.0531, 59.3278, "Z", "paid")
 
 	reg := domain.Regulation{Source: domain.Source{System: "test", Reference: "reg-replace"}, EffectiveFrom: time.Now()}
-	if err := st.UpsertRegulations(ctx, []domain.Regulation{reg}); err != nil {
+	if _, err := st.UpsertRegulations(ctx, []domain.Regulation{reg}); err != nil {
 		t.Fatalf("upsert reg: %v", err)
 	}
 	var regID string
