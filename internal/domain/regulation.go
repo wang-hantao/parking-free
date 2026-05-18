@@ -36,9 +36,15 @@ const (
 // Rule is one applicable policy fragment. A Regulation may contain
 // many Rules with different time windows, vehicle-class filters, or
 // geometric scopes.
+//
+// Source is denormalised from the parent Regulation for read-path
+// efficiency: the engine surfaces it on Reason without a second
+// lookup. Stores set this when reading; transforms can leave it empty
+// (the postgres store populates it via JOIN on regulation).
 type Rule struct {
 	ID             string         `json:"id"`
 	RegulationID   string         `json:"regulation_id"`
+	Source         Source         `json:"source,omitempty"`
 	Kind           RuleKind       `json:"kind"`
 	MaxDuration    time.Duration  `json:"max_duration,omitempty"`
 	NeedsPayment   bool           `json:"needs_payment"`

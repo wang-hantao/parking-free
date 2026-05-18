@@ -116,6 +116,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 		reason := domain.Reason{
 			RuleID:        s.rule.ID,
 			RegulationID:  s.rule.RegulationID,
+			Source:        s.rule.Source,
 			Disposition:   s.rule.Kind,
 			HumanReadable: humanise(s.rule),
 		}
@@ -215,17 +216,24 @@ func appendUnique(s []string, v string) []string {
 }
 
 // humanise produces a brief human-readable description of a rule.
-// In production, this would be a templated, localised renderer; the
-// stub here is deliberately minimal.
+// In production this would be a templated, localised renderer; the
+// stub here at least distinguishes the four combinations of
+// NeedsPayment × NeedsPermit so the reasons array isn't ambiguous.
 func humanise(r domain.Rule) string {
 	switch r.Kind {
 	case domain.RuleForbid:
 		return "Parking forbidden"
 	case domain.RuleAllow:
-		if r.NeedsPayment {
+		switch {
+		case r.NeedsPayment && r.NeedsPermit:
+			return "Parking allowed with payment or valid permit"
+		case r.NeedsPermit:
+			return "Parking allowed only for permit holders"
+		case r.NeedsPayment:
 			return "Parking allowed with payment"
+		default:
+			return "Parking allowed"
 		}
-		return "Parking allowed"
 	case domain.RuleRestrict:
 		return "Parking allowed with restrictions"
 	}

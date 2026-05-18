@@ -253,6 +253,71 @@ func TestEvaluate_PriorityOrdering(t *testing.T) {
 	}
 }
 
+func TestEvaluate_SourcePropagatesToReason(t *testing.T) {
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "r1", Kind: domain.RuleAllow,
+				Source: domain.Source{
+					System:    "stockholm.ltf-tolken",
+					Reference: "0180 2017-01931",
+				},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, err := ev.Evaluate(context.Background(), Query{Vehicle: domain.Vehicle{Class: domain.VehicleCar}, At: atUTC(2026, 5, 7, 12, 0)})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(v.Reasons) != 1 {
+		t.Fatalf("expected 1 reason, got %d", len(v.Reasons))
+	}
+	if v.Reasons[0].Source.System != "stockholm.ltf-tolken" {
+		t.Errorf("source system: want stockholm.ltf-tolken, got %q", v.Reasons[0].Source.System)
+	}
+	if v.Reasons[0].Source.Reference != "0180 2017-01931" {
+		t.Errorf("source ref: want '0180 2017-01931', got %q", v.Reasons[0].Source.Reference)
+	}
+}
+
+func TestEvaluate_HumaniseDisambiguatesPermitFromPayment(t *testing.T) {
+	cases := []struct {
+		name         string
+		needsPayment bool
+		needsPermit  bool
+		want         string
+	}{
+		{"plain", false, false, "Parking allowed"},
+		{"payment", true, false, "Parking allowed with payment"},
+		{"permit", false, true, "Parking allowed only for permit holders"},
+		{"both", true, true, "Parking allowed with payment or valid permit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &fakeSource{
+				rules: []domain.Rule{
+					{
+						ID: "r1", Kind: domain.RuleAllow,
+						NeedsPayment: tc.needsPayment,
+						NeedsPermit:  tc.needsPermit,
+						TimeWindows:  []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+					},
+				},
+			}
+			ev := New(src, NewHolidayCalendarSE())
+			v, _ := ev.Evaluate(context.Background(), Query{Vehicle: domain.Vehicle{Class: domain.VehicleCar}, At: atUTC(2026, 5, 7, 12, 0)})
+			if len(v.Reasons) != 1 {
+				t.Fatalf("want 1 reason, got %d", len(v.Reasons))
+			}
+			if v.Reasons[0].HumanReadable != tc.want {
+				t.Errorf("human_readable: want %q, got %q", tc.want, v.Reasons[0].HumanReadable)
+			}
+		})
+	}
+}
+
 func contains(s []string, v string) bool {
 	for _, x := range s {
 		if x == v {

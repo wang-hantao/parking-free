@@ -11,11 +11,18 @@ package postgres
 // (geography cast). The radius is the user-supplied search radius
 // PLUS the rule's own offset extent (for the 10m-before-junction class
 // of rule, where offset_from = -10).
+//
+// Each query also joins the parent regulation to pull source_system
+// and source_reference. These are denormalised onto domain.Rule.Source
+// so the engine can surface them in Reason — the defensible-citation
+// audit trail.
 const sqlRulesByZone = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
-       r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority
+       r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
+       reg.source_system, COALESCE(reg.source_reference, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
+JOIN regulation reg ON reg.id = r.regulation_id
 JOIN zone z ON z.id = a.target_id
 WHERE a.target_kind = 'zone'
   AND ST_DWithin(
@@ -26,9 +33,11 @@ WHERE a.target_kind = 'zone'
 
 const sqlRulesByParkingArea = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
-       r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority
+       r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
+       reg.source_system, COALESCE(reg.source_reference, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
+JOIN regulation reg ON reg.id = r.regulation_id
 JOIN parking_area pa ON pa.id = a.target_id
 WHERE a.target_kind = 'parking_area'
   AND ST_DWithin(
@@ -39,9 +48,11 @@ WHERE a.target_kind = 'parking_area'
 
 const sqlRulesByRoadSegment = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
-       r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority
+       r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
+       reg.source_system, COALESCE(reg.source_reference, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
+JOIN regulation reg ON reg.id = r.regulation_id
 JOIN road_segment rs ON rs.id = a.target_id
 WHERE a.target_kind = 'road_segment'
   AND ST_DWithin(
@@ -52,9 +63,11 @@ WHERE a.target_kind = 'road_segment'
 
 const sqlRulesByPOI = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
-       r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority
+       r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
+       reg.source_system, COALESCE(reg.source_reference, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
+JOIN regulation reg ON reg.id = r.regulation_id
 JOIN point_of_interest poi ON poi.id = a.target_id
 WHERE a.target_kind = 'poi'
   AND ST_DWithin(

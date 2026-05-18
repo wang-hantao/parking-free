@@ -120,6 +120,7 @@ func (s *Store) fetchRules(ctx context.Context, query string, lng, lat, radius f
 			&r.ID, &r.RegulationID, &r.Kind,
 			&maxDurSec, &r.NeedsPayment, &r.NeedsPermit,
 			&classes, &r.Priority,
+			&r.Source.System, &r.Source.Reference,
 		); err != nil {
 			return nil, err
 		}
