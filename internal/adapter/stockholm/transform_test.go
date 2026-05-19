@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/wang-hantao/parking-free/internal/domain"
 )
@@ -140,11 +141,146 @@ func TestTransform_Servicedagar_WeekdayVariation(t *testing.T) {
 }
 
 func TestTransform_OtherForeskrifter_ReturnSchemaPending(t *testing.T) {
-	for _, f := range []Foreskrift{PBuss, PLastbil, PMotorcykel, PRorelsehindrad} {
+	for _, f := range []Foreskrift{PLastbil, PMotorcykel, PRorelsehindrad} {
 		_, err := Transform(f, []byte(`{"type":"FeatureCollection","features":[]}`))
 		if !errors.Is(err, ErrSchemaPending) {
 			t.Errorf("%s: expected ErrSchemaPending, got %v", f, err)
 		}
+	}
+}
+
+func TestTransform_PBuss_RealSample(t *testing.T) {
+	raw := loadFixture(t, "pbuss_sample.json")
+	batch, err := Transform(PBuss, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if got := len(batch.RoadSegments); got != 5 {
+		t.Errorf("road segments: want 5, got %d", got)
+	}
+	// 4 distinct CITATIONs (FID 34 and 35 share one).
+	if got := len(batch.Regulations); got != 4 {
+		t.Errorf("regulations: want 4 (FID 34 and 35 share citation), got %d", got)
+	}
+	if got := len(batch.Rules); got != 5 {
+		t.Errorf("rules: want 5, got %d", got)
+	}
+
+	// Every rule should be bus-class only.
+	for i, r := range batch.Rules {
+		if len(r.VehicleClasses) != 1 || r.VehicleClasses[0] != domain.VehicleBus {
+			t.Errorf("rule %d: want VehicleClasses=[bus], got %v", i, r.VehicleClasses)
+		}
+		if r.Kind != domain.RuleAllow {
+			t.Errorf("rule %d: want kind=allow, got %s", i, r.Kind)
+		}
+	}
+}
+
+func TestTransform_PBuss_MaxMinutesMapsToMaxDuration(t *testing.T) {
+	// FID 34 and 35 have MAX_MINUTES=30; the rest have none.
+	raw := loadFixture(t, "pbuss_sample.json")
+	batch, _ := Transform(PBuss, raw)
+
+	got := map[string]time.Duration{}
+	for _, r := range batch.Rules {
+		got[r.AppliesTo[0].TargetID] = r.MaxDuration
+	}
+
+	if got["pbuss/34/1"] != 30*time.Minute {
+		t.Errorf("FID 34: want MaxDuration 30m, got %v", got["pbuss/34/1"])
+	}
+	if got["pbuss/35/2"] != 30*time.Minute {
+		t.Errorf("FID 35: want MaxDuration 30m, got %v", got["pbuss/35/2"])
+	}
+	if got["pbuss/41/1"] != 0 {
+		t.Errorf("FID 41: want no MaxDuration, got %v", got["pbuss/41/1"])
+	}
+}
+
+func TestTransform_PBuss_MidnightCrossingWindow(t *testing.T) {
+	// FID 20: START_TIME=1400, END_TIME=900, START_WEEKDAY=måndag.
+	// Means Mon 14:00 → Tue 09:00. WeekdayMask must include BOTH
+	// Monday (bit 2) and Tuesday (bit 4) for the engine to match the
+	// Tuesday tail of the window.
+	raw := loadFixture(t, "pbuss_sample.json")
+	batch, _ := Transform(PBuss, raw)
+
+	var found *domain.Rule
+	for i := range batch.Rules {
+		if batch.Rules[i].AppliesTo[0].TargetID == "pbuss/20/1" {
+			found = &batch.Rules[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("FID 20 rule not found")
+	}
+	tw := found.TimeWindows[0]
+	if tw.WeekdayMask != 2|4 { // Mon | Tue = 6
+		t.Errorf("weekday mask: want 6 (Mon+Tue), got %d", tw.WeekdayMask)
+	}
+	if tw.StartMin != 840 {
+		t.Errorf("start min: want 840 (14:00), got %d", tw.StartMin)
+	}
+	if tw.EndMin != 540 {
+		t.Errorf("end min: want 540 (09:00 next day), got %d", tw.EndMin)
+	}
+}
+
+func TestTransform_PBuss_NoTimeFields_AppliesAllDay(t *testing.T) {
+	// FID 34/35 have no time fields at all; just MAX_MINUTES.
+	// → 24/7 time window.
+	raw := loadFixture(t, "pbuss_sample.json")
+	batch, _ := Transform(PBuss, raw)
+
+	var found *domain.Rule
+	for i := range batch.Rules {
+		if batch.Rules[i].AppliesTo[0].TargetID == "pbuss/34/1" {
+			found = &batch.Rules[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("FID 34 rule not found")
+	}
+	tw := found.TimeWindows[0]
+	if tw.WeekdayMask != 127 {
+		t.Errorf("weekday mask: want 127 (24/7), got %d", tw.WeekdayMask)
+	}
+	if tw.StartMin != 0 || tw.EndMin != 1440 {
+		t.Errorf("time range: want [0, 1440), got [%d, %d)", tw.StartMin, tw.EndMin)
+	}
+}
+
+func TestBuildTimeWindow_CrossesMidnight_ExtendsMaskToNextDay(t *testing.T) {
+	// Mon 14:00 → 09:00 next day. Mask must include both Mon (2) and Tue (4).
+	tw := buildTimeWindow("måndag", 1400, 900)
+	if tw.WeekdayMask != 6 {
+		t.Errorf("mask: want 6 (Mon+Tue), got %d", tw.WeekdayMask)
+	}
+	if tw.StartMin != 840 || tw.EndMin != 540 {
+		t.Errorf("range: want [840, 540), got [%d, %d)", tw.StartMin, tw.EndMin)
+	}
+}
+
+func TestBuildTimeWindow_CrossesMidnight_SaturdayWrapsToSunday(t *testing.T) {
+	// Sat 23:00 → 02:00 next day. Mask must include Sat (64) and Sun (1) = 65.
+	tw := buildTimeWindow("lördag", 2300, 200)
+	if tw.WeekdayMask != 65 {
+		t.Errorf("mask: want 65 (Sat+Sun), got %d", tw.WeekdayMask)
+	}
+}
+
+func TestBuildTimeWindow_EndOfDayNotMidnightCrossing(t *testing.T) {
+	// END_TIME=0 with START_TIME>0 is end-of-day, not a wrap. Should
+	// NOT extend the mask (single-day window 06:00 → 24:00).
+	tw := buildTimeWindow("fredag", 600, 0)
+	if tw.WeekdayMask != 32 { // fredag only
+		t.Errorf("mask: want 32 (Fri only — no wrap), got %d", tw.WeekdayMask)
+	}
+	if tw.StartMin != 360 || tw.EndMin != 1440 {
+		t.Errorf("range: want [360, 1440), got [%d, %d)", tw.StartMin, tw.EndMin)
 	}
 }
 

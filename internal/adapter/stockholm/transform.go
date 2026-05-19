@@ -44,7 +44,9 @@ func Transform(f Foreskrift, raw []byte) (*IngestBatch, error) {
 		return transformServicedagar(fc), nil
 	case PTillaten:
 		return transformPTillaten(fc), nil
-	case PBuss, PLastbil, PMotorcykel, PRorelsehindrad:
+	case PBuss:
+		return transformReservedSpot(fc, reservedSpotConfigs[PBuss]), nil
+	case PLastbil, PMotorcykel, PRorelsehindrad:
 		return nil, fmt.Errorf("%w: %s schema not yet captured; run `ingester dump <dir> %s` and share the sample so transform can be written", ErrSchemaPending, f, f)
 	default:
 		return nil, fmt.Errorf("stockholm: unknown foreskrift %q", f)
@@ -261,6 +263,127 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 	return batch
 }
 
+// =============================================================================
+// Reserved-class spots (pbuss, plastbil, pmotorcykel, prorelsehindrad)
+// =============================================================================
+
+// reservedSpotConfig captures the per-föreskrift specifics for the
+// "Reserverad p-plats X" pattern. The four reserved-class föreskrifter
+// share the same JSON shape (confirmed for pbuss; the rest are
+// guarded by ErrSchemaPending until their samples confirm).
+type reservedSpotConfig struct {
+	foreskrift   Foreskrift
+	pathPrefix   string              // for road_segment source_reference (e.g. "pbuss")
+	vehicleClass domain.VehicleClass // empty when permit-based rather than class-based
+	needsPermit  bool                // true for prorelsehindrad (disabled placard)
+}
+
+// reservedSpotConfigs maps each reserved-class föreskrift to its
+// vehicle-class / permit configuration. plastbil, pmotorcykel and
+// prorelsehindrad entries are populated based on pattern inference
+// but NOT yet wired in the Transform() switch — enable them only
+// after confirming their JSON shapes match the pbuss pattern.
+var reservedSpotConfigs = map[Foreskrift]reservedSpotConfig{
+	PBuss:           {PBuss, "pbuss", domain.VehicleBus, false},
+	PLastbil:        {PLastbil, "plastbil", domain.VehicleTruck, false},
+	PMotorcykel:     {PMotorcykel, "pmotorcykel", domain.VehicleMotorcycle, false},
+	PRorelsehindrad: {PRorelsehindrad, "prorelsehindrad", "", true},
+}
+
+// transformReservedSpot converts each feature into:
+//   - one RoadSegment record (per feature)
+//   - one Regulation (deduplicated by CITATION)
+//   - one Rule of kind=allow scoped to the configured VehicleClass
+//     (and/or NeedsPermit), with MaxDuration from MAX_MINUTES when
+//     present.
+//
+// v1 limitation worth flagging: when a car queries a bus-only spot
+// with no other nearby rules, the engine's "no applicable rule →
+// default allowed" behaviour produces a false positive. The bus rule
+// is filtered out by vehicle-class mismatch and nothing else fires.
+// Fixing this properly needs either a new Reserve rule kind in the
+// engine, explicit Forbid rules for non-listed classes, or a
+// "nearest-segment-only" query mode. The pbuss rule still appears in
+// the response with its citation so the user has the audit trail.
+func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *IngestBatch {
+	batch := &IngestBatch{}
+	regSeen := map[string]bool{}
+
+	for _, feat := range fc.Features {
+		props := feat.Properties
+
+		citation := propStr(props, "CITATION")
+		fid := propInt(props, "FID")
+		extentNo := propInt(props, "EXTENT_NO")
+		if citation == "" || fid == 0 {
+			continue
+		}
+
+		if feat.Geometry.Type != "LineString" {
+			continue
+		}
+		var coords [][]float64
+		if err := json.Unmarshal(feat.Geometry.Coordinates, &coords); err != nil || len(coords) < 2 {
+			continue
+		}
+
+		segRef := fmt.Sprintf("%s/%d/%d", cfg.pathPrefix, fid, extentNo)
+
+		batch.RoadSegments = append(batch.RoadSegments, domain.RoadSegment{
+			Source:       domain.Source{System: SourceSystem, Reference: segRef},
+			StreetName:   propStr(props, "STREET_NAME"),
+			Municipality: "Stockholm",
+			GeometryWKT:  linestringWKT(coords),
+		})
+
+		if !regSeen[citation] {
+			regSeen[citation] = true
+			var validFrom time.Time
+			if vfStr := propStr(props, "VALID_FROM"); vfStr != "" {
+				if t, err := time.Parse(time.RFC3339, vfStr); err == nil {
+					validFrom = t
+				}
+			}
+			batch.Regulations = append(batch.Regulations, domain.Regulation{
+				Source:            domain.Source{System: SourceSystem, Reference: citation},
+				DecisionAuthority: "Stockholms stad",
+				Language:          "sv-SE",
+				EffectiveFrom:     validFrom,
+			})
+		}
+
+		startHHMM := propInt(props, "START_TIME")
+		endHHMM := propInt(props, "END_TIME")
+		weekday := propStr(props, "START_WEEKDAY")
+
+		var classes []domain.VehicleClass
+		if cfg.vehicleClass != "" {
+			classes = []domain.VehicleClass{cfg.vehicleClass}
+		}
+
+		var maxDur time.Duration
+		if m := propInt(props, "MAX_MINUTES"); m > 0 {
+			maxDur = time.Duration(m) * time.Minute
+		}
+
+		batch.Rules = append(batch.Rules, domain.Rule{
+			RegulationID:   citation, // placeholder
+			Kind:           domain.RuleAllow,
+			Priority:       5, // same as ptillaten; servicedagar Forbid (10) still wins
+			VehicleClasses: classes,
+			NeedsPermit:    cfg.needsPermit,
+			MaxDuration:    maxDur,
+			TimeWindows:    []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
+			AppliesTo: []domain.AppliesTo{{
+				Kind:     domain.TargetRoadSegment,
+				TargetID: segRef, // placeholder
+			}},
+		})
+	}
+
+	return batch
+}
+
 // SourceSystem is the value used in domain.Source.System for every
 // record ingested from LTF-Tolken.
 const SourceSystem = "stockholm.ltf-tolken"
@@ -302,14 +425,24 @@ func hhmmToMin(hhmm int) int {
 }
 
 // buildTimeWindow constructs a TimeWindow from raw LTF properties.
-// Handles three real cases observed in the data:
+// Handles four real cases observed in the data:
 //
 //  1. All three values absent (weekday empty, both times 0): the rule
 //     applies 24/7. Returns mask=127, [0, 1440).
 //  2. END_TIME=0 with START_TIME>0: this is "end of day" semantics,
 //     not "start of day". E.g. ptillaten {600, 0, fredag} means
 //     "Friday 06:00 to midnight" — converted to [360, 1440).
-//  3. Normal: e.g. servicedagar {0, 600, fredag} → [0, 360).
+//  3. Normal same-day range: e.g. servicedagar {0, 600, fredag} →
+//     [0, 360) on Friday only.
+//  4. Midnight-crossing window: e.g. pbuss {1400, 900, måndag} means
+//     "Monday 14:00 → Tuesday 09:00". The engine's matchingWindows()
+//     filters by weekday bit BEFORE the inTimeRange() crosses-midnight
+//     logic kicks in, so a single-day mask would miss the Tuesday
+//     tail. We expand the mask to include the next weekday, with Sat
+//     (bit 64) wrapping to Sun (bit 1). The engine's inTimeRange()
+//     then correctly accepts tod>=start on Monday and tod<end on
+//     Tuesday, while rejecting Mon 12:00 (neither branch) and
+//     Tue 10:00 (neither branch).
 //
 // The TimeWindow output is what the engine's matchingWindows() will
 // then filter by weekday bit and time-of-day range.
@@ -322,8 +455,18 @@ func buildTimeWindow(weekday string, startHHMM, endHHMM int) domain.TimeWindow {
 	if endHHMM == 0 && startHHMM > 0 {
 		endMin = 1440
 	}
+	mask := weekdayMask(weekday)
+	// Crosses midnight: extend mask to include the next weekday so the
+	// early-morning tail of the window is matched correctly.
+	if endMin < startMin && endMin > 0 && mask > 0 {
+		next := mask << 1
+		if next > 64 {
+			next = 1 // wrap: Saturday → Sunday
+		}
+		mask |= next
+	}
 	return domain.TimeWindow{
-		WeekdayMask: weekdayMask(weekday),
+		WeekdayMask: mask,
 		StartMin:    startMin,
 		EndMin:      endMin,
 	}
