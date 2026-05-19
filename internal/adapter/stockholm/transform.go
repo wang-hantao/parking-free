@@ -48,10 +48,10 @@ func Transform(f Foreskrift, raw []byte) (*IngestBatch, error) {
 		return transformReservedSpot(fc, reservedSpotConfigs[PBuss]), nil
 	case PLastbil:
 		return transformReservedSpot(fc, reservedSpotConfigs[PLastbil]), nil
+	case PMotorcykel:
+		return transformReservedSpot(fc, reservedSpotConfigs[PMotorcykel]), nil
 	case PRorelsehindrad:
 		return transformReservedSpot(fc, reservedSpotConfigs[PRorelsehindrad]), nil
-	case PMotorcykel:
-		return nil, fmt.Errorf("%w: %s schema not yet captured; run `ingester dump <dir> %s` and share the sample so transform can be written", ErrSchemaPending, f, f)
 	default:
 		return nil, fmt.Errorf("stockholm: unknown foreskrift %q", f)
 	}
@@ -64,10 +64,17 @@ var ErrSchemaPending = errors.New("stockholm: response transform pending schema 
 // IngestBatch is the deliverable from Transform. Rules carry
 // placeholders in RegulationID and AppliesTo.TargetID that the
 // ingester resolves after upserting geometries and regulations.
+//
+// SkippedFeatures records how many features the transform refused to
+// process — currently only those carrying seasonal date-range fields
+// (START_MONTH/END_MONTH/START_DAY/END_DAY), which the engine doesn't
+// yet match against. The ingester surfaces this count in its logs so
+// the gap is visible and quantifiable.
 type IngestBatch struct {
-	RoadSegments []domain.RoadSegment
-	Regulations  []domain.Regulation
-	Rules        []domain.Rule
+	RoadSegments    []domain.RoadSegment
+	Regulations     []domain.Regulation
+	Rules           []domain.Rule
+	SkippedFeatures int
 }
 
 // =============================================================================
@@ -316,6 +323,21 @@ func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *Ingest
 	for _, feat := range fc.Features {
 		props := feat.Properties
 
+		// Seasonal date-range features (START_MONTH/END_MONTH/...) carry
+		// the rule's calendar window in month+day pairs. The engine
+		// doesn't currently honour TimeWindow.DateFrom/DateTo, so a
+		// naïve ingest would either fire the rule year-round (wrong)
+		// or drop the calendar context silently. We skip them and
+		// surface the count via IngestBatch.SkippedFeatures so the
+		// gap is quantifiable. Affects ~40% of pmotorcykel features
+		// (Stockholm relaxes MC cleaning rules in summer); other
+		// reserved-class föreskrifter rarely use this pattern.
+		if propInt(props, "START_MONTH") != 0 || propInt(props, "END_MONTH") != 0 ||
+			propInt(props, "START_DAY") != 0 || propInt(props, "END_DAY") != 0 {
+			batch.SkippedFeatures++
+			continue
+		}
+
 		citation := propStr(props, "CITATION")
 		fid := propInt(props, "FID")
 		extentNo := propInt(props, "EXTENT_NO")
@@ -370,11 +392,21 @@ func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *Ingest
 			maxDur = time.Duration(m) * time.Minute
 		}
 
+		// Payment is required when VF_PLATS_TYP indicates either
+		// metered ("avgift") or residential ("boende") parking — both
+		// imply that non-permit-holders pay the hourly rate. The
+		// pmotorcykel spots are the first to carry "boende" without
+		// also carrying "avgift", which is why this check lives here
+		// rather than on the static config.
+		typ := strings.ToLower(propStr(props, "VF_PLATS_TYP"))
+		needsPayment := strings.Contains(typ, "avgift") || strings.Contains(typ, "boende")
+
 		batch.Rules = append(batch.Rules, domain.Rule{
 			RegulationID:   citation, // placeholder
 			Kind:           domain.RuleAllow,
-			Priority:       5, // same as ptillaten; servicedagar Forbid (10) still wins
+			Priority:       5,
 			VehicleClasses: classes,
+			NeedsPayment:   needsPayment,
 			NeedsPermit:    cfg.needsPermit,
 			MaxDuration:    maxDur,
 			TimeWindows:    []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},

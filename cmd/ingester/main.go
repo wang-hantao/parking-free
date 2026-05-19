@@ -180,6 +180,7 @@ func runIngest(logger *slog.Logger, cfg config.Config, args []string) {
 			"regulations", len(batch.Regulations),
 			"rules", len(resolved),
 			"rules_dropped", dropped,
+			"features_skipped", batch.SkippedFeatures,
 			"elapsed_ms", time.Since(t0).Milliseconds())
 	}
 }

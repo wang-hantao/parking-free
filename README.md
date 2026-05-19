@@ -114,10 +114,19 @@ real cleaning-window enforcement: a verdict of `allowed: false` if you
 query a position on a road segment during its weekly servicedag, with
 the contributing rule and the citation URL surfaced in `reasons`.
 
-`pbuss`, `plastbil`, `pmotorcykel`, and `prorelsehindrad` return
-`ErrSchemaPending` until their JSON schemas are captured and modelled —
-capture and share a sample of each via `ingester dump` to extend the
-transform.
+All six föreskrifter — `servicedagar`, `ptillaten`, `pbuss`,
+`plastbil`, `pmotorcykel`, `prorelsehindrad` — are transformed into
+domain Rules. The transforms preserve the LTF citation as the
+regulation source-reference, so every rule is traceable back to its
+RDT decision URL.
+
+Some pmotorcykel features carry seasonal date-range fields
+(`START_MONTH`/`END_MONTH`/`START_DAY`/`END_DAY`) that describe rules
+which vary by season (e.g. no street cleaning in summer). The engine
+doesn't yet honour `TimeWindow.DateFrom`/`DateTo`, so those features
+are counted in `features_skipped` in the ingester log and not
+persisted. Roughly 40% of pmotorcykel features carry this pattern;
+adding engine-side seasonal-date support is a separate follow-up.
 
 ### Schema inspection
 

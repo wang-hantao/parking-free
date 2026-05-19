@@ -1,7 +1,6 @@
 package stockholm
 
 import (
-	"errors"
 	"os"
 	"testing"
 	"time"
@@ -140,13 +139,75 @@ func TestTransform_Servicedagar_WeekdayVariation(t *testing.T) {
 	}
 }
 
-func TestTransform_OtherForeskrifter_ReturnSchemaPending(t *testing.T) {
-	for _, f := range []Foreskrift{PMotorcykel} {
-		_, err := Transform(f, []byte(`{"type":"FeatureCollection","features":[]}`))
-		if !errors.Is(err, ErrSchemaPending) {
-			t.Errorf("%s: expected ErrSchemaPending, got %v", f, err)
+func TestTransform_PMotorcykel_RealSample(t *testing.T) {
+	raw := loadFixture(t, "pmotorcykel_sample.json")
+	batch, err := Transform(PMotorcykel, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	// Sample has 5 features. FID 371 and 372 carry seasonal date-range
+	// fields and should be skipped. Survivors: FID 128, 515, 235.
+	if got := len(batch.RoadSegments); got != 3 {
+		t.Errorf("road segments: want 3 (after skipping 2 seasonal), got %d", got)
+	}
+	if got := batch.SkippedFeatures; got != 2 {
+		t.Errorf("skipped features: want 2 (FID 371 and 372), got %d", got)
+	}
+	if got := len(batch.Regulations); got != 3 {
+		t.Errorf("regulations: want 3, got %d", got)
+	}
+	if got := len(batch.Rules); got != 3 {
+		t.Errorf("rules: want 3, got %d", got)
+	}
+
+	// Every surviving rule: motorcycle class + payment required.
+	for i, r := range batch.Rules {
+		if len(r.VehicleClasses) != 1 || r.VehicleClasses[0] != domain.VehicleMotorcycle {
+			t.Errorf("rule %d: want VehicleClasses=[motorcycle], got %v", i, r.VehicleClasses)
+		}
+		if !r.NeedsPayment {
+			t.Errorf("rule %d: want NeedsPayment=true (boende in VF_PLATS_TYP), got false", i)
+		}
+		if r.Kind != domain.RuleAllow {
+			t.Errorf("rule %d: want kind=allow, got %s", i, r.Kind)
 		}
 	}
+}
+
+func TestTransform_PMotorcykel_SkippedFeaturesNotInBatch(t *testing.T) {
+	// The two seasonal FIDs (371, 372) should not produce any rules.
+	raw := loadFixture(t, "pmotorcykel_sample.json")
+	batch, _ := Transform(PMotorcykel, raw)
+	for _, r := range batch.Rules {
+		ref := r.AppliesTo[0].TargetID
+		if ref == "pmotorcykel/371/1" || ref == "pmotorcykel/372/1" {
+			t.Errorf("seasonal feature should have been skipped: got rule for %s", ref)
+		}
+	}
+	for _, seg := range batch.RoadSegments {
+		ref := seg.Source.Reference
+		if ref == "pmotorcykel/371/1" || ref == "pmotorcykel/372/1" {
+			t.Errorf("seasonal feature should have been skipped: got segment for %s", ref)
+		}
+	}
+}
+
+func TestTransform_PMotorcykel_BoendeMapsToNeedsPayment(t *testing.T) {
+	// FID 128 has VF_PLATS_TYP="Reserverad p-plats motorcykel boende"
+	// (no "avgift" string). The transform should still set
+	// NeedsPayment=true because of the "boende" suffix.
+	raw := loadFixture(t, "pmotorcykel_sample.json")
+	batch, _ := Transform(PMotorcykel, raw)
+	for _, r := range batch.Rules {
+		if r.AppliesTo[0].TargetID == "pmotorcykel/128/1" {
+			if !r.NeedsPayment {
+				t.Errorf("FID 128: 'boende' should imply NeedsPayment=true")
+			}
+			return
+		}
+	}
+	t.Errorf("FID 128 rule not found")
 }
 
 func TestTransform_PLastbil_RealSample(t *testing.T) {
