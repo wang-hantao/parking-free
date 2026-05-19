@@ -46,7 +46,11 @@ func Transform(f Foreskrift, raw []byte) (*IngestBatch, error) {
 		return transformPTillaten(fc), nil
 	case PBuss:
 		return transformReservedSpot(fc, reservedSpotConfigs[PBuss]), nil
-	case PLastbil, PMotorcykel, PRorelsehindrad:
+	case PLastbil:
+		return transformReservedSpot(fc, reservedSpotConfigs[PLastbil]), nil
+	case PRorelsehindrad:
+		return transformReservedSpot(fc, reservedSpotConfigs[PRorelsehindrad]), nil
+	case PMotorcykel:
 		return nil, fmt.Errorf("%w: %s schema not yet captured; run `ingester dump <dir> %s` and share the sample so transform can be written", ErrSchemaPending, f, f)
 	default:
 		return nil, fmt.Errorf("stockholm: unknown foreskrift %q", f)

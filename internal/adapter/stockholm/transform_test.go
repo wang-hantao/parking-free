@@ -141,11 +141,101 @@ func TestTransform_Servicedagar_WeekdayVariation(t *testing.T) {
 }
 
 func TestTransform_OtherForeskrifter_ReturnSchemaPending(t *testing.T) {
-	for _, f := range []Foreskrift{PLastbil, PMotorcykel, PRorelsehindrad} {
+	for _, f := range []Foreskrift{PMotorcykel} {
 		_, err := Transform(f, []byte(`{"type":"FeatureCollection","features":[]}`))
 		if !errors.Is(err, ErrSchemaPending) {
 			t.Errorf("%s: expected ErrSchemaPending, got %v", f, err)
 		}
+	}
+}
+
+func TestTransform_PLastbil_RealSample(t *testing.T) {
+	raw := loadFixture(t, "plastbil_sample.json")
+	batch, err := Transform(PLastbil, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if got := len(batch.RoadSegments); got != 2 {
+		t.Errorf("road segments: want 2, got %d", got)
+	}
+	if got := len(batch.Regulations); got != 2 {
+		t.Errorf("regulations: want 2 (different citations), got %d", got)
+	}
+	if got := len(batch.Rules); got != 2 {
+		t.Errorf("rules: want 2, got %d", got)
+	}
+
+	// Every rule should be truck-class only with 30min MaxDuration.
+	for i, r := range batch.Rules {
+		if len(r.VehicleClasses) != 1 || r.VehicleClasses[0] != domain.VehicleTruck {
+			t.Errorf("rule %d: want VehicleClasses=[truck], got %v", i, r.VehicleClasses)
+		}
+		if r.MaxDuration != 30*time.Minute {
+			t.Errorf("rule %d: want MaxDuration 30m, got %v", i, r.MaxDuration)
+		}
+		// Wed 06:00 → end of day. Mask=8 (onsdag), [360, 1440).
+		tw := r.TimeWindows[0]
+		if tw.WeekdayMask != 8 || tw.StartMin != 360 || tw.EndMin != 1440 {
+			t.Errorf("rule %d: window: want mask=8, [360,1440), got mask=%d, [%d,%d)",
+				i, tw.WeekdayMask, tw.StartMin, tw.EndMin)
+		}
+	}
+}
+
+func TestTransform_PRorelsehindrad_RealSample(t *testing.T) {
+	raw := loadFixture(t, "prorelsehindrad_sample.json")
+	batch, err := Transform(PRorelsehindrad, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if got := len(batch.RoadSegments); got != 5 {
+		t.Errorf("road segments: want 5, got %d", got)
+	}
+	// All 5 features have distinct citations.
+	if got := len(batch.Regulations); got != 5 {
+		t.Errorf("regulations: want 5, got %d", got)
+	}
+	if got := len(batch.Rules); got != 5 {
+		t.Errorf("rules: want 5, got %d", got)
+	}
+
+	// All rules: permit-based, no vehicle class restriction, 24/7.
+	for i, r := range batch.Rules {
+		if !r.NeedsPermit {
+			t.Errorf("rule %d: want NeedsPermit=true (disabled placard), got false", i)
+		}
+		if len(r.VehicleClasses) != 0 {
+			t.Errorf("rule %d: want no vehicle class restriction, got %v", i, r.VehicleClasses)
+		}
+		if r.MaxDuration != 0 {
+			t.Errorf("rule %d: want no MaxDuration, got %v", i, r.MaxDuration)
+		}
+		tw := r.TimeWindows[0]
+		if tw.WeekdayMask != 127 || tw.StartMin != 0 || tw.EndMin != 1440 {
+			t.Errorf("rule %d: want 24/7 window, got mask=%d, [%d,%d)",
+				i, tw.WeekdayMask, tw.StartMin, tw.EndMin)
+		}
+	}
+}
+
+func TestTransform_PRorelsehindrad_PreservesPlaceholderStreetName(t *testing.T) {
+	// FID 695 has STREET_NAME="<Gatunamn saknas>" — preserved as-is for
+	// fidelity to source. Display layer can handle it.
+	raw := loadFixture(t, "prorelsehindrad_sample.json")
+	batch, _ := Transform(PRorelsehindrad, raw)
+
+	var found bool
+	for _, seg := range batch.RoadSegments {
+		if seg.Source.Reference == "prorelsehindrad/695/1" {
+			if seg.StreetName != "<Gatunamn saknas>" {
+				t.Errorf("FID 695: want street name preserved as %q, got %q",
+					"<Gatunamn saknas>", seg.StreetName)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("FID 695 segment not found")
 	}
 }
 
