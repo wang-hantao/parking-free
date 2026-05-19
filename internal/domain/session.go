@@ -26,6 +26,7 @@ type ParkingSession struct {
 // minimally-configured server still returns a valid, smaller payload.
 type Verdict struct {
 	Allowed     bool      `json:"allowed"`
+	Summary     string    `json:"summary,omitempty"`      // plain-English explanation of the verdict
 	ExpiresAt   time.Time `json:"expires_at"`             // earliest moment the verdict could change
 	Reasons     []Reason  `json:"reasons"`                // contributing rules, supportive and contrary
 	NeedsAction []string  `json:"needs_action,omitempty"` // e.g. ["pay_via_app", "show_disc"]
@@ -43,13 +44,25 @@ type Verdict struct {
 // presence of every contributing rule (with its source reference) is
 // what makes a Verdict defensible — both for end-user explanation and
 // for generating dispute letters.
+//
+// Supports vs Blocks:
+//   - Supports = true when this rule is consistent with the verdict
+//     outcome (a Forbid in a "not allowed" verdict, or a satisfiable
+//     Allow in an "allowed" verdict).
+//   - Blocks   = true when this specific rule is a reason the verdict
+//     is "not allowed". For a Forbid: always true if the verdict is
+//     false. For an unsatisfied Allow (e.g. NeedsPermit and the user
+//     has no permit): true only when no other rule satisfies the user
+//     (otherwise the unsatisfied rule is merely informational, not
+//     blocking — the user could comply with the other rule).
 type Reason struct {
 	RuleID        string   `json:"rule_id"`
 	RegulationID  string   `json:"regulation_id"`
 	Source        Source   `json:"source"`
 	Disposition   RuleKind `json:"disposition"`
 	HumanReadable string   `json:"human_readable"`
-	Supports      bool     `json:"supports"` // true if this reason supports the verdict
+	Supports      bool     `json:"supports"`
+	Blocks        bool     `json:"blocks,omitempty"`
 }
 
 // FineEvent is recorded when a parking fine is issued for or against a

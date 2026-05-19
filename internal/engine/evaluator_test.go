@@ -326,3 +326,179 @@ func contains(s []string, v string) bool {
 	}
 	return false
 }
+
+// =============================================================================
+// Satisfiability-based verdict tests
+// =============================================================================
+
+func TestEvaluate_PermitRequiredNoPermit_DisallowedWhenNoAlternative(t *testing.T) {
+	// Disabled-only spot, user has no permit. Only Allow rule in scope
+	// is unsatisfiable. Verdict must be false.
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "disabled-only", Kind: domain.RuleAllow,
+				NeedsPermit: true,
+				Source:      domain.Source{System: "stockholm.ltf-tolken", Reference: "0180 2017-02280"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, err := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if v.Allowed {
+		t.Errorf("expected allowed=false when only rule requires permit user lacks")
+	}
+	if len(v.Reasons) != 1 {
+		t.Fatalf("expected 1 reason, got %d", len(v.Reasons))
+	}
+	if !v.Reasons[0].Blocks {
+		t.Errorf("expected the disabled rule to be marked Blocks=true")
+	}
+	if v.Summary == "" {
+		t.Errorf("expected a Summary string")
+	}
+	if !contains(v.NeedsAction, "obtain_permit") {
+		t.Errorf("needs_action should contain obtain_permit; got %v", v.NeedsAction)
+	}
+}
+
+func TestEvaluate_PermitRequiredWithPermit_Allowed(t *testing.T) {
+	// Same disabled-only spot, but user has a valid permit.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "disabled-only", Kind: domain.RuleAllow,
+				NeedsPermit: true,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		permits: map[string][]domain.Permit{
+			"ABC123": {{
+				Kind:      domain.PermitDisabled,
+				Plate:     "ABC123",
+				ValidFrom: now.Add(-24 * time.Hour),
+				ValidTo:   now.Add(24 * time.Hour),
+			}},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if !v.Allowed {
+		t.Errorf("expected allowed=true when user has a matching permit")
+	}
+	if v.Reasons[0].Blocks {
+		t.Errorf("Blocks should be false when verdict is allowed")
+	}
+	if contains(v.NeedsAction, "obtain_permit") {
+		t.Errorf("needs_action should NOT contain obtain_permit when user has one")
+	}
+}
+
+func TestEvaluate_PermitPlusPaidNearby_AllowedViaPaidPath(t *testing.T) {
+	// Disabled spot + paid spot both within radius. User has no permit
+	// but can pay. Should be allowed via the paid path; unsatisfied
+	// permit rule is informational, not blocking.
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "disabled-spot", Kind: domain.RuleAllow,
+				NeedsPermit: true,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "paid-spot", Kind: domain.RuleAllow,
+				NeedsPayment: true,
+				TimeWindows:  []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if !v.Allowed {
+		t.Errorf("expected allowed=true when a satisfiable path exists")
+	}
+	// Both reasons appear; neither blocks since allowed=true.
+	for _, r := range v.Reasons {
+		if r.Blocks {
+			t.Errorf("no reason should Block when allowed=true; got %+v", r)
+		}
+	}
+	// Summary mentions the permit-only context.
+	if !contains([]string{v.Summary}, "Parking allowed with payment (some nearby spots are permit-only)") {
+		t.Errorf("unexpected summary: %q", v.Summary)
+	}
+}
+
+func TestEvaluate_ForbidStillWins(t *testing.T) {
+	// Forbid is highest precedence even if there's a satisfiable Allow.
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "cleaning", Kind: domain.RuleForbid, Priority: 10,
+				Source:      domain.Source{System: "stockholm.ltf-tolken", Reference: "0180 2017-04586"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "paid", Kind: domain.RuleAllow, Priority: 5,
+				NeedsPayment: true,
+				TimeWindows:  []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if v.Allowed {
+		t.Errorf("Forbid should override satisfiable Allow")
+	}
+	// The Forbid should Block, the Allow should not.
+	var forbidBlocks, allowBlocks bool
+	for _, r := range v.Reasons {
+		if r.RuleID == "cleaning" {
+			forbidBlocks = r.Blocks
+		}
+		if r.RuleID == "paid" {
+			allowBlocks = r.Blocks
+		}
+	}
+	if !forbidBlocks {
+		t.Errorf("Forbid rule should have Blocks=true")
+	}
+	if allowBlocks {
+		t.Errorf("Allow rule should NOT have Blocks=true when Forbid is the cause")
+	}
+	if v.Summary != "Parking forbidden at this location" {
+		t.Errorf("unexpected summary: %q", v.Summary)
+	}
+}
+
+func TestEvaluate_NoRulesAtAll_DefaultAllowed(t *testing.T) {
+	// With no rules in scope, default to allowed (nothing forbids).
+	ev := New(&fakeSource{}, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if !v.Allowed {
+		t.Errorf("expected allowed=true with no rules; got false")
+	}
+	if v.Summary != "Parking allowed" {
+		t.Errorf("unexpected summary: %q", v.Summary)
+	}
+}

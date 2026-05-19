@@ -108,41 +108,97 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 	})
 
 	verdict := domain.Verdict{
-		Allowed:   true, // default; a Forbid will overturn this
 		ExpiresAt: q.At.Add(24 * time.Hour),
 	}
 
+	hasPermit := hasMatchingPermit(permits, q.At)
+
+	// Two-pass build: first construct all reasons and track which Allow
+	// rules are satisfiable by this user; then determine Allowed and
+	// the Blocks flag on each reason from the aggregate state.
+	type stagedReason struct {
+		reason      domain.Reason
+		isForbid    bool
+		isAllow     bool
+		satisfiable bool // for Allow only
+		needsPermit bool // for Allow only — whether this rule contributes the "obtain_permit" need
+	}
+
+	var staged []*stagedReason
+	var forbidFired, allowExists, satisfiableAllow bool
+
 	for _, s := range active {
-		reason := domain.Reason{
+		r := domain.Reason{
 			RuleID:        s.rule.ID,
 			RegulationID:  s.rule.RegulationID,
 			Source:        s.rule.Source,
 			Disposition:   s.rule.Kind,
 			HumanReadable: humanise(s.rule),
 		}
+		sr := &stagedReason{reason: r}
 
 		switch s.rule.Kind {
 		case domain.RuleForbid:
-			verdict.Allowed = false
-			reason.Supports = true
-			verdict.Reasons = append(verdict.Reasons, reason)
+			forbidFired = true
+			sr.isForbid = true
 		case domain.RuleAllow, domain.RuleRestrict:
-			if s.rule.NeedsPermit && !hasMatchingPermit(permits, q.At) {
+			allowExists = true
+			sr.isAllow = true
+			sr.satisfiable = true
+			if s.rule.NeedsPermit && !hasPermit {
 				verdict.NeedsAction = appendUnique(verdict.NeedsAction, "obtain_permit")
+				sr.satisfiable = false
+				sr.needsPermit = true
 			}
 			if s.rule.NeedsPayment {
 				verdict.NeedsAction = appendUnique(verdict.NeedsAction, "pay_via_app")
+				// Payment is always satisfiable: user can choose to pay.
 			}
-			reason.Supports = verdict.Allowed
-			verdict.Reasons = append(verdict.Reasons, reason)
+			if sr.satisfiable {
+				satisfiableAllow = true
+			}
 		}
 
-		// Tighten ExpiresAt to the earliest window boundary that
-		// could change the verdict.
+		staged = append(staged, sr)
+
+		// Tighten ExpiresAt to the earliest window boundary that could
+		// change the verdict.
 		if next := nextWindowBoundary(q.At, s.windows); !next.IsZero() && next.Before(verdict.ExpiresAt) {
 			verdict.ExpiresAt = next
 		}
 	}
+
+	// Decide Allowed.
+	//
+	//   - Forbid fires → not allowed (highest precedence).
+	//   - Else: if any Allow exists, allowed only when at least one is
+	//     satisfiable by this user. With no Allows at all, default to
+	//     allowed (nothing forbids).
+	switch {
+	case forbidFired:
+		verdict.Allowed = false
+	case allowExists:
+		verdict.Allowed = satisfiableAllow
+	default:
+		verdict.Allowed = true
+	}
+
+	// Mark Supports and Blocks on each reason.
+	for _, sr := range staged {
+		switch {
+		case sr.isForbid:
+			sr.reason.Supports = !verdict.Allowed // supports the not-allowed verdict
+			sr.reason.Blocks = !verdict.Allowed
+		case sr.isAllow:
+			sr.reason.Supports = sr.satisfiable && verdict.Allowed
+			// An unsatisfied Allow blocks only when no satisfiable
+			// alternative exists — otherwise it's just informational.
+			sr.reason.Blocks = !sr.satisfiable && !verdict.Allowed && !forbidFired
+		}
+		verdict.Reasons = append(verdict.Reasons, sr.reason)
+	}
+
+	verdict.Summary = computeSummary(verdict.Allowed, forbidFired, verdict.NeedsAction)
 
 	// Enrichment: optional fields populated when the source supports them.
 	e.enrich(ctx, q, &verdict, active)
@@ -213,6 +269,45 @@ func appendUnique(s []string, v string) []string {
 		}
 	}
 	return append(s, v)
+}
+
+// computeSummary produces a one-line plain-English explanation of the
+// verdict, intended for direct display. The detailed reasons array
+// remains the source of truth; this just gives clients a ready-made
+// label.
+func computeSummary(allowed, forbidFired bool, needsAction []string) string {
+	needsPay := containsString(needsAction, "pay_via_app")
+	needsPermit := containsString(needsAction, "obtain_permit")
+
+	if !allowed {
+		if forbidFired {
+			return "Parking forbidden at this location"
+		}
+		return "Parking not permitted: nearby spots require a permit you don't have"
+	}
+
+	switch {
+	case needsPay && needsPermit:
+		// Mixed paid + permit-only spots within scope; user can park
+		// via the paid path. Flag the permit-only context so they know.
+		return "Parking allowed with payment (some nearby spots are permit-only)"
+	case needsPay:
+		return "Parking allowed with payment"
+	case needsPermit:
+		// Reached only if the user has a permit (else allowed=false).
+		return "Parking allowed for permit holders"
+	default:
+		return "Parking allowed"
+	}
+}
+
+func containsString(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // humanise produces a brief human-readable description of a rule.
