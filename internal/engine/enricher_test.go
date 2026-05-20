@@ -8,15 +8,16 @@ import (
 	"github.com/wang-hantao/parking-free/internal/domain"
 )
 
-// richSource implements RuleSource plus all optional sub-interfaces,
-// for testing the enrichment paths together.
+// richSource implements RuleSource plus optional Zone/Operator/Hazard
+// sub-interfaces for testing the enrichment paths together. Pricing
+// is no longer interface-driven — it comes from Rule.TariffClassCode
+// against the registry the Evaluator was constructed with.
 type richSource struct {
 	rules     []domain.Rule
 	permits   map[string][]domain.Permit
 	zone      *domain.ZoneRef
 	street    string
 	muni      string
-	tariffs   []TariffWindow
 	operators []domain.OperatorOption
 	hazards   []domain.Warning
 }
@@ -30,14 +31,25 @@ func (r *richSource) PermitsForPlate(_ context.Context, plate string) ([]domain.
 func (r *richSource) ZoneAt(_ context.Context, _ domain.Coordinate) (*domain.ZoneRef, string, string, error) {
 	return r.zone, r.street, r.muni, nil
 }
-func (r *richSource) TariffsAt(_ context.Context, _ domain.Coordinate, _ time.Time) ([]TariffWindow, error) {
-	return r.tariffs, nil
-}
 func (r *richSource) OperatorsForZone(_ context.Context, _, _ string) ([]domain.OperatorOption, error) {
 	return r.operators, nil
 }
 func (r *richSource) HazardsNearby(_ context.Context, _ domain.Coordinate, _ time.Time) ([]domain.Warning, error) {
 	return r.hazards, nil
+}
+
+// testTariffClasses gives the pricing tests a stable, simple
+// schedule independent of Stockholm's real registry, so changes in
+// taxa rates don't break unrelated tests.
+var testTariffClasses = map[string]TariffClass{
+	"test.simple": {
+		Code:        "test.simple",
+		Description: "Test tariff: 25 SEK/h normal weekdays 09-18, otherwise free",
+		Currency:    "SEK",
+		Windows: []TariffWindowSpec{
+			{DayType: domain.DayTypeNormal, StartMin: 540, EndMin: 1080, Rate: 25, PerSec: 3600, Priority: 10},
+		},
+	},
 }
 
 func TestEnrich_EmptySourceProducesMinimalEnrichment(t *testing.T) {
@@ -93,15 +105,20 @@ func TestEnrich_LocationFromZoneSource(t *testing.T) {
 	}
 }
 
-func TestEnrich_PricingFromTariffSource(t *testing.T) {
-	at := atUTC(2026, 5, 7, 14, 0) // 14:00 Thursday
+func TestEnrich_PricingFromTariffClass_InsidePaidWindow(t *testing.T) {
+	// 14:00 Thursday — inside the priced 09-18 window. Expect 25 SEK/h
+	// current, free starting at 18:00.
+	at := atUTC(2026, 5, 7, 14, 0)
 	src := &richSource{
-		tariffs: []TariffWindow{
-			{From: atUTC(2026, 5, 7, 9, 0), To: atUTC(2026, 5, 7, 18, 0), Amount: 25, Per: "hour", Currency: "SEK"},
-			{From: atUTC(2026, 5, 7, 18, 0), To: atUTC(2026, 5, 8, 9, 0), Amount: 0, Per: "hour", Currency: "SEK"},
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				TariffClassCode: "test.simple",
+				TimeWindows:     []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
 		},
 	}
-	ev := New(src, NewHolidayCalendarSE())
+	ev := New(src, NewHolidayCalendarSE()).WithTariffClasses(testTariffClasses)
 	v, err := ev.Evaluate(context.Background(), Query{
 		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
 		At:      at,
@@ -126,6 +143,61 @@ func TestEnrich_PricingFromTariffSource(t *testing.T) {
 	}
 	if v.Pricing.NextRate == nil || v.Pricing.NextRate.Amount != 0 {
 		t.Errorf("next_rate.amount: want 0 (free), got %+v", v.Pricing.NextRate)
+	}
+}
+
+func TestEnrich_PricingFromTariffClass_FreeOutsideWindow(t *testing.T) {
+	// 20:00 Thursday — past the priced window. Expect free, next
+	// rate kicking in at 09:00 Friday.
+	at := atUTC(2026, 5, 7, 20, 0)
+	src := &richSource{
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				TariffClassCode: "test.simple",
+				TimeWindows:     []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE()).WithTariffClasses(testTariffClasses)
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      at,
+	})
+	if v.Pricing == nil {
+		t.Fatalf("expected Pricing")
+	}
+	if !v.Pricing.IsFreeNow {
+		t.Errorf("expected IsFreeNow=true at 20:00")
+	}
+	if v.Pricing.CurrentRate != nil {
+		t.Errorf("CurrentRate should be nil when free; got %+v", v.Pricing.CurrentRate)
+	}
+	if v.Pricing.NextRateChange == nil || !v.Pricing.NextRateChange.Equal(atUTC(2026, 5, 8, 9, 0)) {
+		t.Errorf("next_rate_change: want Fri 09:00, got %+v", v.Pricing.NextRateChange)
+	}
+	if v.Pricing.NextRate == nil || v.Pricing.NextRate.Amount != 25 {
+		t.Errorf("next_rate.amount: want 25, got %+v", v.Pricing.NextRate)
+	}
+}
+
+func TestEnrich_PricingFromUnknownTariffClass_Skipped(t *testing.T) {
+	src := &richSource{
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				TariffClassCode: "nonexistent.code",
+				TimeWindows:     []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE()).WithTariffClasses(testTariffClasses)
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 14, 0),
+	})
+	if v.Pricing != nil {
+		t.Errorf("expected no Pricing when class is unknown; got %+v", v.Pricing)
 	}
 }
 
@@ -183,16 +255,19 @@ func TestEnrich_ConstraintsFromActiveRules(t *testing.T) {
 }
 
 func TestEnrich_EstimatedCostAcrossTariffBoundary(t *testing.T) {
-	// Park at 16:00 for 4h: 16:00–18:00 paid (25/h), 18:00–20:00 free.
-	// Total = 25 * 2 = 50 SEK.
+	// Park at 16:00 Thursday for 4h: 16:00–18:00 paid at 25/h (=50),
+	// 18:00–20:00 free. Total = 50 SEK.
 	at := atUTC(2026, 5, 7, 16, 0)
 	src := &richSource{
-		tariffs: []TariffWindow{
-			{From: atUTC(2026, 5, 7, 9, 0), To: atUTC(2026, 5, 7, 18, 0), Amount: 25, Per: "hour", Currency: "SEK"},
-			{From: atUTC(2026, 5, 7, 18, 0), To: atUTC(2026, 5, 8, 9, 0), Amount: 0, Per: "hour", Currency: "SEK"},
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				TariffClassCode: "test.simple",
+				TimeWindows:     []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
 		},
 	}
-	ev := New(src, NewHolidayCalendarSE())
+	ev := New(src, NewHolidayCalendarSE()).WithTariffClasses(testTariffClasses)
 	v, err := ev.Evaluate(context.Background(), Query{
 		Vehicle:  domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
 		At:       at,

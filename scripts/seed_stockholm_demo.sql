@@ -2,8 +2,8 @@
 --
 -- Demo seed for the Stureplan area (~ 59.3330, 18.0681) in central
 -- Stockholm. Populates a zone, the four Stockholm-authorised payment
--- operators, a 25 SEK/hour tariff, and a paid-parking rule, so the
--- /allowed endpoint returns a fully enriched response.
+-- operators, and a paid-parking rule tagged with the Stockholm taxa 2
+-- class, so the /allowed endpoint returns a fully enriched response.
 --
 -- Run:
 --   make seed
@@ -20,10 +20,14 @@
 --   curl 'http://localhost:8080/allowed?lat=59.3330&lng=18.0681&plate=ABC123&duration_minutes=180'
 --
 -- DEMO LIMITATION: The seeded rule fires 24/7 so you see enrichment
--- regardless of the time you query. Real Stockholm parking is paid
--- Mon-Fri 09:00-18:00 with different rules on Saturdays and Sundays.
--- LTF-Tolken ingestion will produce realistic time windows once the
--- transform is implemented.
+-- regardless of the time you query. Pricing comes from the in-process
+-- tariff class registry (internal/engine/tariffs.go), which has a real
+-- Stockholm-shaped schedule for taxa 2: 31 SEK/h Mon-Fri 07-21 +
+-- pre-holiday/holiday 09-19, 20 SEK/h other times.
+--
+-- Once you ingest real LTF-Tolken data (`make ingest`), the demo
+-- zone is overshadowed by real rules per road segment, and the demo
+-- rule still serves as a fallback when ingestion isn't run.
 
 BEGIN;
 
@@ -95,18 +99,9 @@ SELECT o.id, 'E-1',  z.id, ''
   FROM operator o, zone z WHERE o.name = 'ePARK'    AND z.source_system = 'demo' AND z.source_reference = 'stureplan';
 
 -- ---------------------------------------------------------------------------
--- Tariff: 25 SEK / hour, attached to each operator_zone (Stockholm
--- authorisation parity means all four operators charge the same).
--- ---------------------------------------------------------------------------
-
-INSERT INTO tariff (operator_zone_id, currency, rate_per_unit, time_unit_s)
-SELECT oz.id, 'SEK', 25, 3600
-  FROM operator_zone oz
-  JOIN zone z ON z.id = oz.maps_to_zone_id
- WHERE z.source_system = 'demo' AND z.source_reference = 'stureplan';
-
--- ---------------------------------------------------------------------------
--- Regulation + Rule: paid parking, max 2 hours.
+-- Regulation + Rule: paid parking, max 2 hours, tagged with taxa 2.
+-- The class definition (rates by day-type and time-of-day) lives in
+-- internal/engine/tariffs.go.
 -- ---------------------------------------------------------------------------
 
 WITH new_reg AS (
@@ -115,8 +110,9 @@ WITH new_reg AS (
   RETURNING id
 ),
 new_rule AS (
-  INSERT INTO rule (regulation_id, kind, max_duration_s, needs_payment, needs_permit, vehicle_classes, priority)
-  SELECT id, 'allow', 7200, TRUE, FALSE, ARRAY[]::TEXT[], 5
+  INSERT INTO rule (regulation_id, kind, max_duration_s, needs_payment, needs_permit,
+                    vehicle_classes, priority, tariff_class_code)
+  SELECT id, 'allow', 7200, TRUE, FALSE, ARRAY[]::TEXT[], 5, 'stockholm.taxa.2'
     FROM new_reg
   RETURNING id
 ),
@@ -141,10 +137,6 @@ SELECT 'zone'         AS object, COUNT(*) FROM zone WHERE source_system = 'demo'
 UNION ALL SELECT 'road_segment',  COUNT(*) FROM road_segment WHERE source_system = 'demo'
 UNION ALL SELECT 'operator',      COUNT(*) FROM operator WHERE name IN ('EasyPark','Parkster','Mobill','ePARK')
 UNION ALL SELECT 'operator_zone', COUNT(*) FROM operator_zone oz
-                                  JOIN zone z ON z.id = oz.maps_to_zone_id
-                                  WHERE z.source_system = 'demo'
-UNION ALL SELECT 'tariff',        COUNT(*) FROM tariff t
-                                  JOIN operator_zone oz ON oz.id = t.operator_zone_id
                                   JOIN zone z ON z.id = oz.maps_to_zone_id
                                   WHERE z.source_system = 'demo'
 UNION ALL SELECT 'regulation',    COUNT(*) FROM regulation WHERE source_system = 'demo'

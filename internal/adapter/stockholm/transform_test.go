@@ -653,3 +653,85 @@ func TestWeekdayMask(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// PARKING_RATE → TariffClassCode tests
+// =============================================================================
+
+func TestParseTaxaCode(t *testing.T) {
+	cases := map[string]string{
+		"taxa 3: 20 kr/tim vardagar 7-19":              "stockholm.taxa.3",
+		"taxa 12: Vardagar utom vardag före sön-":      "stockholm.taxa.12",
+		"taxa 1: 55 kr/tim alla dagar 00-24 Boende: …": "stockholm.taxa.1",
+		"TAXA 13: …":            "stockholm.taxa.13", // case-insensitive
+		"Boende: 1100 kr/månad": "",                  // no taxa prefix
+		"":                      "",
+	}
+	for input, want := range cases {
+		got := parseTaxaCode(input)
+		if got != want {
+			t.Errorf("parseTaxaCode(%q): want %q, got %q", input, want, got)
+		}
+	}
+}
+
+func TestTransform_Servicedagar_CarriesTariffClassCode(t *testing.T) {
+	// Servicedagar features ALSO carry PARKING_RATE (the rate that
+	// applies when the cleaning rule isn't active). Verify the code
+	// rides on the Forbid rule for retrieval at pricing time.
+	raw := loadFixture(t, "servicedagar_sample.json")
+	batch, err := Transform(Servicedagar, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(batch.Rules) == 0 {
+		t.Fatalf("no rules")
+	}
+	// At least one rule should have a taxa code.
+	var found bool
+	for _, r := range batch.Rules {
+		if r.TariffClassCode != "" {
+			if !startsWith(r.TariffClassCode, "stockholm.taxa.") {
+				t.Errorf("unexpected code shape: %q", r.TariffClassCode)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected at least one rule with TariffClassCode")
+	}
+}
+
+func TestTransform_Ptillaten_CarriesTariffClassCode(t *testing.T) {
+	raw := loadFixture(t, "ptillaten_sample.json")
+	batch, _ := Transform(PTillaten, raw)
+	var found bool
+	for _, r := range batch.Rules {
+		if r.TariffClassCode != "" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected at least one ptillaten rule with TariffClassCode")
+	}
+}
+
+func TestTransform_PBuss_CarriesTariffClassCode(t *testing.T) {
+	raw := loadFixture(t, "pbuss_sample.json")
+	batch, _ := Transform(PBuss, raw)
+	var found bool
+	for _, r := range batch.Rules {
+		if r.TariffClassCode != "" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected at least one pbuss rule with TariffClassCode")
+	}
+}
+
+func startsWith(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}

@@ -53,6 +53,13 @@ type Rule struct {
 	Priority       int            `json:"priority"`                  // higher wins on conflict
 	TimeWindows    []TimeWindow   `json:"time_windows"`
 	AppliesTo      []AppliesTo    `json:"applies_to"`
+
+	// TariffClassCode points at a tariff schedule defined in the
+	// engine's class registry (e.g. "stockholm.taxa.3"). Optional —
+	// rules that don't carry pricing (forbid, simple allow without a
+	// PARKING_RATE) leave it empty. Resolved at enrichment time, not
+	// stored on disk beyond this column.
+	TariffClassCode string `json:"tariff_class_code,omitempty"`
 }
 
 // MatchesVehicle returns true if this rule applies to the given vehicle.

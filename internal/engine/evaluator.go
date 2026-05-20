@@ -12,9 +12,11 @@ import (
 // the store layer in production and by in-memory fakes in tests.
 //
 // A RuleSource may also implement any of the optional sub-interfaces
-// declared in enricher.go (ZoneSource, TariffSource, OperatorSource,
-// HazardSource) to populate the corresponding Verdict fields. The
-// engine type-asserts and skips those a source does not support.
+// declared in enricher.go (ZoneSource, OperatorSource, HazardSource)
+// to populate the corresponding Verdict fields. The engine type-
+// asserts and skips those a source does not support. Pricing is no
+// longer interface-driven — it derives from each Rule's
+// TariffClassCode against the in-process TariffClasses registry.
 type RuleSource interface {
 	// RulesNearby returns all rules whose applies-to geometry includes
 	// or comes within the given radius of the position. The store is
@@ -42,15 +44,25 @@ type scoredRule struct {
 }
 
 // Evaluator computes a Verdict for a Query. It is stateless beyond
-// its holiday calendar and a RuleSource.
+// its holiday calendar, a RuleSource, and the tariff class registry.
 type Evaluator struct {
-	src RuleSource
-	cal *HolidayCalendar
+	src           RuleSource
+	cal           *HolidayCalendar
+	tariffClasses map[string]TariffClass
 }
 
-// New constructs an Evaluator.
+// New constructs an Evaluator using the default Stockholm tariff
+// class registry. Tests can swap the registry with WithTariffClasses.
 func New(src RuleSource, cal *HolidayCalendar) *Evaluator {
-	return &Evaluator{src: src, cal: cal}
+	return &Evaluator{src: src, cal: cal, tariffClasses: TariffClasses}
+}
+
+// WithTariffClasses replaces the registry used for pricing
+// enrichment. Returns the same evaluator for chaining; intended for
+// tests that need to assert behaviour against a known schedule.
+func (e *Evaluator) WithTariffClasses(classes map[string]TariffClass) *Evaluator {
+	e.tariffClasses = classes
+	return e
 }
 
 // Evaluate runs the rule walk and returns a Verdict.

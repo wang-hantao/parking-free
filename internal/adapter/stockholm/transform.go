@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -162,10 +163,11 @@ func transformServicedagar(fc featureCollection) *IngestBatch {
 		weekday := propStr(props, "START_WEEKDAY")
 
 		batch.Rules = append(batch.Rules, domain.Rule{
-			RegulationID: citation, // placeholder; ingester resolves to UUID
-			Kind:         domain.RuleForbid,
-			Priority:     10, // servicedagar are strict, take precedence
-			TimeWindows:  []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
+			RegulationID:    citation, // placeholder; ingester resolves to UUID
+			Kind:            domain.RuleForbid,
+			Priority:        10, // servicedagar are strict, take precedence
+			TariffClassCode: parseTaxaCode(propStr(props, "PARKING_RATE")),
+			TimeWindows:     []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
 			AppliesTo: []domain.AppliesTo{{
 				Kind:     domain.TargetRoadSegment,
 				TargetID: segRef, // placeholder; ingester resolves to UUID
@@ -258,12 +260,13 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 		weekday := propStr(props, "START_WEEKDAY")
 
 		batch.Rules = append(batch.Rules, domain.Rule{
-			RegulationID: citation, // placeholder
-			Kind:         domain.RuleAllow,
-			Priority:     5, // lower than servicedagar (10), so cleaning wins on overlap
-			NeedsPayment: needsPayment,
-			NeedsPermit:  needsPermit,
-			TimeWindows:  []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
+			RegulationID:    citation, // placeholder
+			Kind:            domain.RuleAllow,
+			Priority:        5, // lower than servicedagar (10), so cleaning wins on overlap
+			NeedsPayment:    needsPayment,
+			NeedsPermit:     needsPermit,
+			TariffClassCode: parseTaxaCode(propStr(props, "PARKING_RATE")),
+			TimeWindows:     []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
 			AppliesTo: []domain.AppliesTo{{
 				Kind:     domain.TargetRoadSegment,
 				TargetID: segRef, // placeholder
@@ -402,14 +405,15 @@ func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *Ingest
 		needsPayment := strings.Contains(typ, "avgift") || strings.Contains(typ, "boende")
 
 		batch.Rules = append(batch.Rules, domain.Rule{
-			RegulationID:   citation, // placeholder
-			Kind:           domain.RuleAllow,
-			Priority:       5,
-			VehicleClasses: classes,
-			NeedsPayment:   needsPayment,
-			NeedsPermit:    cfg.needsPermit,
-			MaxDuration:    maxDur,
-			TimeWindows:    []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
+			RegulationID:    citation, // placeholder
+			Kind:            domain.RuleAllow,
+			Priority:        5,
+			VehicleClasses:  classes,
+			NeedsPayment:    needsPayment,
+			NeedsPermit:     cfg.needsPermit,
+			MaxDuration:     maxDur,
+			TariffClassCode: parseTaxaCode(propStr(props, "PARKING_RATE")),
+			TimeWindows:     []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
 			AppliesTo: []domain.AppliesTo{{
 				Kind:     domain.TargetRoadSegment,
 				TargetID: segRef, // placeholder
@@ -545,4 +549,26 @@ func linestringWKT(coords [][]float64) string {
 		parts = append(parts, fmt.Sprintf("%.6f %.6f", c[0], c[1]))
 	}
 	return "LINESTRING(" + strings.Join(parts, ",") + ")"
+}
+
+// taxaRE matches the "taxa N" prefix that every Stockholm
+// PARKING_RATE string opens with. Captures the class number.
+var taxaRE = regexp.MustCompile(`(?i)\btaxa\s+(\d+)`)
+
+// parseTaxaCode extracts the Stockholm taxa class number from a
+// PARKING_RATE string and returns the registry key.
+//
+//	"taxa 3: 20 kr/tim vardagar 7-19, ..."  →  "stockholm.taxa.3"
+//	"taxa 12: Vardagar utom ..."            →  "stockholm.taxa.12"
+//	""                                      →  ""
+//
+// Returns "" if the string doesn't match — the engine's registry
+// lookup then yields no pricing for the rule, which is the correct
+// behaviour: better silent on missing data than fabricating a rate.
+func parseTaxaCode(rate string) string {
+	m := taxaRE.FindStringSubmatch(rate)
+	if len(m) < 2 {
+		return ""
+	}
+	return "stockholm.taxa." + m[1]
 }

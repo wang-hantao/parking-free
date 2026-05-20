@@ -19,7 +19,8 @@ package postgres
 const sqlRulesByZone = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
-       reg.source_system, COALESCE(reg.source_reference, '')
+       reg.source_system, COALESCE(reg.source_reference, ''),
+       COALESCE(r.tariff_class_code, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -34,7 +35,8 @@ WHERE a.target_kind = 'zone'
 const sqlRulesByParkingArea = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
-       reg.source_system, COALESCE(reg.source_reference, '')
+       reg.source_system, COALESCE(reg.source_reference, ''),
+       COALESCE(r.tariff_class_code, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -49,7 +51,8 @@ WHERE a.target_kind = 'parking_area'
 const sqlRulesByRoadSegment = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
-       reg.source_system, COALESCE(reg.source_reference, '')
+       reg.source_system, COALESCE(reg.source_reference, ''),
+       COALESCE(r.tariff_class_code, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -64,7 +67,8 @@ WHERE a.target_kind = 'road_segment'
 const sqlRulesByPOI = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
-       reg.source_system, COALESCE(reg.source_reference, '')
+       reg.source_system, COALESCE(reg.source_reference, ''),
+       COALESCE(r.tariff_class_code, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -114,20 +118,12 @@ ORDER BY ST_Distance(
 LIMIT 1`
 
 // --- Enrichment: tariffs ------------------------------------------------
-
-// v1 returns one open-ended TariffWindow per distinct tariff active
-// for the position's zone. DISTINCT collapses the case where multiple
-// authorised operators (Stockholm parity model) carry identical
-// tariffs — without it, the engine sees them as separate windows and
-// emits a spurious next_rate_change. Future schema changes will add
-// weekday/time-of-day columns to tariff so the store can return real
-// per-window pricing.
-const sqlTariffsAt = `
-SELECT DISTINCT t.currency, t.rate_per_unit::float8, t.time_unit_s, t.max_session_cost::float8
-FROM tariff t
-JOIN operator_zone oz ON oz.id = t.operator_zone_id
-JOIN zone z ON z.id = oz.maps_to_zone_id
-WHERE ST_Contains(z.geom, ST_SetSRID(ST_MakePoint($1, $2), 4326))`
+//
+// Pricing is no longer queried per-zone from the `tariff` table.
+// Instead, each rule carries a `tariff_class_code` (see migration
+// 0006), which the engine resolves against the in-process tariff
+// class registry. The `tariff` table is retained for future operator-
+// specific pricing experiments but the read path no longer uses it.
 
 // --- Enrichment: operators ----------------------------------------------
 
@@ -180,8 +176,8 @@ const sqlDeleteRulesForRegulation = `DELETE FROM rule WHERE regulation_id = $1`
 const sqlInsertRule = `
 INSERT INTO rule
   (id, regulation_id, kind, max_duration_s, needs_payment, needs_permit,
-   vehicle_classes, priority)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+   vehicle_classes, priority, tariff_class_code)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''))`
 
 const sqlInsertTimeWindow = `
 INSERT INTO rule_time_window

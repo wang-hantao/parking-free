@@ -65,8 +65,10 @@ docker compose up -d
 make migrate
 
 # Optional: seed a small demo dataset (one zone in central Stockholm,
-# the four authorised operators, a 25 SEK/hour tariff, and a paid-
-# parking rule) so /allowed returns a fully enriched response.
+# the four authorised operators, and a paid-parking rule tagged with
+# Stockholm tariff class `stockholm.taxa.2`) so /allowed returns a
+# fully enriched response. Pricing comes from the in-process tariff
+# class registry (internal/engine/tariffs.go), not the seed.
 make seed
 
 # Copy the example env and edit
@@ -144,6 +146,23 @@ go run ./cmd/ingester dump ./samples servicedagar
 
 `dump` requires only `STOCKHOLM_API_KEY`, not `PG_DSN` — it writes raw
 JSON to disk and exits without touching the database.
+
+## Pricing model
+
+Each `Rule` carries a `tariff_class_code` (e.g. `stockholm.taxa.3`),
+parsed from the `PARKING_RATE` field of LTF-Tolken features at ingest
+time. The class definitions — recurring per-day-type windows with
+rates and priorities — live in
+[`internal/engine/tariffs.go`](internal/engine/tariffs.go) as an
+in-process registry. The enricher resolves a rule's code against the
+registry to populate the `pricing` block (`current_rate`,
+`next_rate_change`, `next_rate`) and any `estimated_cost`.
+
+Five Stockholm classes are encoded: `taxa 1` (flat 55 SEK/h), `taxa 2`
+(31 SEK/h Mon-Fri 07-21 + pre-holiday/holiday 09-19, 20 SEK/h other),
+`taxa 3` (20 SEK/h Mon-Fri 07-19, 15 SEK/h pre-holiday 11-17), and the
+MC-reduced variants `taxa 12` and `taxa 13`. Tests swap the registry
+via `Evaluator.WithTariffClasses(...)`.
 
 ## Tests
 

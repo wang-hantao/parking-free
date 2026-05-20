@@ -3,8 +3,13 @@
 // The package provides:
 //   - the required store.Store interface (read + write paths)
 //   - the engine.RuleSource interface (subset used at query time)
-//   - the optional engine sub-interfaces ZoneSource, TariffSource,
-//     OperatorSource (enrichment data path)
+//   - the optional engine sub-interfaces ZoneSource and OperatorSource
+//     (enrichment data path)
+//
+// Pricing is no longer interface-driven on the store: each rule
+// carries a TariffClassCode the engine resolves against an in-process
+// registry. The `tariff` table remains in the schema but is unused by
+// the read path.
 //
 // It does not implement engine.HazardSource — predictive warnings are
 // derived computations and live in a future package on top of the
@@ -22,7 +27,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/wang-hantao/parking-free/internal/domain"
-	"github.com/wang-hantao/parking-free/internal/engine"
 )
 
 // Store is a PostgreSQL-backed store.Store.
@@ -121,6 +125,7 @@ func (s *Store) fetchRules(ctx context.Context, query string, lng, lat, radius f
 			&maxDurSec, &r.NeedsPayment, &r.NeedsPermit,
 			&classes, &r.Priority,
 			&r.Source.System, &r.Source.Reference,
+			&r.TariffClassCode,
 		); err != nil {
 			return nil, err
 		}
@@ -209,60 +214,6 @@ func (s *Store) ZoneAt(ctx context.Context, pos domain.Coordinate) (*domain.Zone
 		return zonePtr, "", "", fmt.Errorf("postgres: street-at: %w", err)
 	}
 	return zonePtr, street, muni, nil
-}
-
-// =============================================================================
-// engine.TariffSource — enrichment
-// =============================================================================
-
-// TariffsAt returns one open-ended TariffWindow per tariff active for
-// the zone containing the position. v1 limitation: tariffs in the
-// current schema are time-of-day-agnostic, so the returned window
-// covers `at` to `at + 24h`. A future migration adding weekday/time
-// columns to `tariff` will let this method return real per-window
-// pricing without changing its signature.
-func (s *Store) TariffsAt(ctx context.Context, pos domain.Coordinate, at time.Time) ([]engine.TariffWindow, error) {
-	rows, err := s.pool.Query(ctx, sqlTariffsAt, pos.Lng, pos.Lat)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: tariffs-at: %w", err)
-	}
-	defer rows.Close()
-
-	var out []engine.TariffWindow
-	for rows.Next() {
-		var (
-			currency string
-			rate     float64
-			unitSec  int
-			maxCost  *float64
-		)
-		if err := rows.Scan(&currency, &rate, &unitSec, &maxCost); err != nil {
-			return nil, err
-		}
-		tw := engine.TariffWindow{
-			From:     at,
-			To:       at.Add(24 * time.Hour),
-			Amount:   rate,
-			Per:      perLabel(time.Duration(unitSec) * time.Second),
-			Currency: currency,
-		}
-		if maxCost != nil {
-			tw.MaxSession = maxCost
-		}
-		out = append(out, tw)
-	}
-	return out, rows.Err()
-}
-
-func perLabel(d time.Duration) string {
-	switch {
-	case d <= time.Minute:
-		return "minute"
-	case d >= 24*time.Hour:
-		return "day"
-	default:
-		return "hour"
-	}
 }
 
 // =============================================================================
@@ -449,6 +400,7 @@ func (s *Store) UpsertRules(ctx context.Context, rules []domain.Rule) error {
 				if _, err := tx.Exec(ctx, sqlInsertRule,
 					r.ID, r.RegulationID, string(r.Kind), maxDurSec,
 					r.NeedsPayment, r.NeedsPermit, classes, r.Priority,
+					r.TariffClassCode,
 				); err != nil {
 					return fmt.Errorf("insert rule %s: %w", r.ID, err)
 				}

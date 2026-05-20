@@ -17,30 +17,14 @@ const EngineVersion = "0.1.0"
 // enrich the Verdict. The engine type-asserts and calls only those
 // the source supports — adding a new enrichment to the platform is a
 // purely additive change to the implementing store.
+//
+// Note: tariff/pricing is no longer interface-driven; it's derived
+// from Rule.TariffClassCode against the in-process TariffClasses
+// registry (see tariffs.go).
 
 // ZoneSource resolves the zone a position is in (paid/residential/etc.).
 type ZoneSource interface {
 	ZoneAt(ctx context.Context, pos domain.Coordinate) (*domain.ZoneRef, string /*street*/, string /*municipality*/, error)
-}
-
-// TariffSource returns the active tariff(s) for a position at a moment.
-// Multiple results are allowed (e.g. weekday + holiday tariffs that
-// would apply at different times); the engine picks the one whose
-// time-window contains `at` for CurrentRate, and the chronologically
-// next one for NextRate.
-type TariffSource interface {
-	TariffsAt(ctx context.Context, pos domain.Coordinate, at time.Time) ([]TariffWindow, error)
-}
-
-// TariffWindow couples a tariff with the time window during which it
-// applies. ZeroAmount indicates a free interval.
-type TariffWindow struct {
-	From       time.Time
-	To         time.Time
-	Amount     float64
-	Per        string // "hour" | "minute" | "day"
-	Currency   string
-	MaxSession *float64
 }
 
 // OperatorSource returns the operators that can take payment for a zone.
@@ -72,12 +56,9 @@ func (e *Evaluator) enrich(ctx context.Context, q Query, v *domain.Verdict, acti
 		}
 	}
 
-	// Pricing.
-	if ts, ok := e.src.(TariffSource); ok {
-		if tws, err := ts.TariffsAt(ctx, q.Position, q.At); err == nil && len(tws) > 0 {
-			v.Pricing = pricingFromTariffs(tws, q.At)
-		}
-	}
+	// Pricing: derived from each active rule's TariffClassCode against
+	// the in-process class registry. No store interface needed.
+	v.Pricing = e.pricingFromActive(q, active)
 
 	// Operators (only populates if we know the zone).
 	if v.Location != nil && v.Location.Zone != nil {
@@ -102,7 +83,7 @@ func (e *Evaluator) enrich(ctx context.Context, q Query, v *domain.Verdict, acti
 	// Estimated cost: only if the client supplied a desired duration
 	// AND we have pricing.
 	if q.Duration > 0 && v.Pricing != nil {
-		v.EstimatedCost = estimateCost(ctx, e.src, q, q.At.Add(q.Duration))
+		v.EstimatedCost = e.estimateCost(q, active, q.At.Add(q.Duration))
 	}
 }
 
@@ -144,30 +125,158 @@ func constraintsFromRules(active []scoredRule) *domain.Constraints {
 	return nil
 }
 
-// pricingFromTariffs picks the tariff whose window contains `at` as
-// CurrentRate, and the next chronological window as NextRate.
-func pricingFromTariffs(tws []TariffWindow, at time.Time) *domain.PricingInfo {
-	sort.Slice(tws, func(i, j int) bool { return tws[i].From.Before(tws[j].From) })
-	p := &domain.PricingInfo{}
-	for i, tw := range tws {
-		if !at.Before(tw.From) && at.Before(tw.To) {
-			p.Currency = tw.Currency
-			p.IsFreeNow = tw.Amount == 0
-			if !p.IsFreeNow {
-				p.CurrentRate = &domain.Rate{Amount: tw.Amount, Per: tw.Per}
-			}
-			p.MaxSessionCost = tw.MaxSession
-			if i+1 < len(tws) {
-				next := tws[i+1]
-				nextTime := next.From
-				p.NextRateChange = &nextTime
-				p.NextRate = &domain.Rate{Amount: next.Amount, Per: next.Per}
-			}
-			return p
+// pricingFromActive computes the Pricing block from the active
+// rules' tariff class codes. The first class found in the active
+// set is the "primary" one. With multiple distinct classes nearby
+// (rare in practice), this picks whichever rule lists first after
+// priority sort — deterministic for tests, good enough for v1.
+func (e *Evaluator) pricingFromActive(q Query, active []scoredRule) *domain.PricingInfo {
+	var class *TariffClass
+	for _, s := range active {
+		code := s.rule.TariffClassCode
+		if code == "" {
+			continue
+		}
+		if c, ok := e.tariffClasses[code]; ok {
+			class = &c
+			break
 		}
 	}
-	// No active window — pricing simply isn't surfaced.
-	return nil
+	if class == nil {
+		return nil
+	}
+
+	current := pickActiveTariffWindow(class.Windows, q.At, e.cal)
+
+	p := &domain.PricingInfo{Currency: class.Currency}
+	if current == nil {
+		// No window matches — parking is free at this moment under
+		// this class (e.g. taxa 3 outside its priced hours).
+		p.IsFreeNow = true
+	} else {
+		p.IsFreeNow = current.Rate == 0
+		if !p.IsFreeNow {
+			p.CurrentRate = &domain.Rate{
+				Amount: current.Rate,
+				Per:    perLabel(time.Duration(current.PerSec) * time.Second),
+			}
+		}
+	}
+
+	// Next rate change: the next moment within the next 48h at which
+	// the active window would differ from the current one.
+	if next, nextRate := nextTariffChange(class.Windows, q.At, e.cal, current); !next.IsZero() {
+		p.NextRateChange = &next
+		if nextRate != nil {
+			p.NextRate = &domain.Rate{Amount: *nextRate, Per: perLabel(time.Hour)}
+		} else {
+			// Rate becomes zero (free hours).
+			p.NextRate = &domain.Rate{Amount: 0, Per: "hour"}
+		}
+	}
+
+	return p
+}
+
+// pickActiveTariffWindow returns the highest-priority window in ws
+// that matches the given moment, or nil if none do.
+func pickActiveTariffWindow(ws []TariffWindowSpec, at time.Time, cal *HolidayCalendar) *TariffWindowSpec {
+	dt := cal.DayType(at)
+	tod := minutesOfDay(at)
+	wbit := 1 << int(at.Weekday())
+
+	var best *TariffWindowSpec
+	for i := range ws {
+		w := &ws[i]
+		if !tariffWindowMatches(*w, dt, tod, wbit) {
+			continue
+		}
+		if best == nil || w.Priority > best.Priority {
+			best = w
+		}
+	}
+	return best
+}
+
+// tariffWindowMatches mirrors the rule-window matcher.
+func tariffWindowMatches(w TariffWindowSpec, dt domain.DayType, tod, weekdayBit int) bool {
+	if w.WeekdayMask != 0 && w.WeekdayMask&weekdayBit == 0 {
+		return false
+	}
+	if w.DayType != "" && w.DayType != dt {
+		return false
+	}
+	return inTimeRange(tod, w.StartMin, w.EndMin)
+}
+
+// nextTariffChange returns the next moment at or after `at` where the
+// active rate would change away from `current`, and the rate that
+// applies at that moment (nil meaning free / no window matches).
+// Searches up to 48h ahead — beyond that there's no useful precision
+// for a verdict that's already capped to a 24h ExpiresAt.
+func nextTariffChange(ws []TariffWindowSpec, at time.Time, cal *HolidayCalendar, current *TariffWindowSpec) (time.Time, *float64) {
+	// Walk every window boundary (start_min and end_min) projected to
+	// today and tomorrow, look for the earliest one strictly after
+	// `at` where the active window differs from `current`.
+	day := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
+	candidates := []time.Time{}
+	for _, offset := range []int{0, 1} {
+		base := day.AddDate(0, 0, offset)
+		for _, w := range ws {
+			if w.StartMin > 0 {
+				candidates = append(candidates, base.Add(time.Duration(w.StartMin)*time.Minute))
+			}
+			if w.EndMin > 0 && w.EndMin < 1440 {
+				candidates = append(candidates, base.Add(time.Duration(w.EndMin)*time.Minute))
+			}
+			// EndMin == 1440 means end of day; the next day's
+			// 00:00 boundary is already covered as offset=1 start.
+			if w.EndMin == 1440 {
+				candidates = append(candidates, base.AddDate(0, 0, 1))
+			}
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Before(candidates[j]) })
+
+	for _, t := range candidates {
+		if !t.After(at) {
+			continue
+		}
+		next := pickActiveTariffWindow(ws, t, cal)
+		if sameWindow(next, current) {
+			continue
+		}
+		if next == nil {
+			return t, nil
+		}
+		r := next.Rate
+		return t, &r
+	}
+	return time.Time{}, nil
+}
+
+func sameWindow(a, b *TariffWindowSpec) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Rate == b.Rate && a.StartMin == b.StartMin && a.EndMin == b.EndMin &&
+		a.WeekdayMask == b.WeekdayMask && a.DayType == b.DayType && a.Priority == b.Priority
+}
+
+// perLabel maps a billing unit duration to the JSON label used in
+// PricingInfo.Rate.Per.
+func perLabel(d time.Duration) string {
+	switch d {
+	case time.Minute:
+		return "minute"
+	case 24 * time.Hour:
+		return "day"
+	default:
+		return "hour"
+	}
 }
 
 // derivedWarnings produces engine-level warnings without needing a
@@ -189,72 +298,59 @@ func (e *Evaluator) derivedWarnings(q Query, active []scoredRule) []domain.Warni
 }
 
 // estimateCost walks tariff windows from start to end, summing per
-// segment. If TariffSource isn't available the function returns nil.
-func estimateCost(ctx context.Context, src RuleSource, q Query, end time.Time) *domain.CostEstimate {
-	ts, ok := src.(TariffSource)
-	if !ok {
+// segment. Uses the same tariff-class machinery as Pricing.
+func (e *Evaluator) estimateCost(q Query, active []scoredRule, end time.Time) *domain.CostEstimate {
+	var class *TariffClass
+	for _, s := range active {
+		code := s.rule.TariffClassCode
+		if code == "" {
+			continue
+		}
+		if c, ok := e.tariffClasses[code]; ok {
+			class = &c
+			break
+		}
+	}
+	if class == nil {
 		return nil
 	}
-	tws, err := ts.TariffsAt(ctx, q.Position, q.At)
-	if err != nil || len(tws) == 0 {
-		return nil
-	}
-	sort.Slice(tws, func(i, j int) bool { return tws[i].From.Before(tws[j].From) })
 
 	est := &domain.CostEstimate{
 		DurationMinutes: int(end.Sub(q.At) / time.Minute),
+		Currency:        class.Currency,
 	}
+
 	cursor := q.At
-	for _, tw := range tws {
-		if !cursor.Before(end) {
-			break
+	// Bound the segment-walking loop: at most one segment per window
+	// boundary within the duration, capped for safety.
+	for i := 0; i < 96 && cursor.Before(end); i++ {
+		curWin := pickActiveTariffWindow(class.Windows, cursor, e.cal)
+		nextTime, _ := nextTariffChange(class.Windows, cursor, e.cal, curWin)
+		segEnd := end
+		if !nextTime.IsZero() && nextTime.Before(end) {
+			segEnd = nextTime
 		}
-		segStart := maxTime(cursor, tw.From)
-		segEnd := minTime(end, tw.To)
-		if !segStart.Before(segEnd) {
-			continue
+
+		seg := domain.CostSegment{From: cursor, To: segEnd}
+		if curWin != nil {
+			seg.Rate = curWin.Rate
+			seg.Cost = costPerWindow(*curWin, cursor, segEnd)
 		}
-		seg := domain.CostSegment{
-			From: segStart,
-			To:   segEnd,
-			Rate: tw.Amount,
-		}
-		seg.Cost = costForSegment(tw, segStart, segEnd)
 		est.Total += seg.Cost
-		est.Currency = tw.Currency
 		est.Breakdown = append(est.Breakdown, seg)
 		cursor = segEnd
 	}
-	if est.Currency == "" {
-		return nil
-	}
+
 	if est.Total < 0 {
 		est.Total = 0
 	}
 	return est
 }
 
-func costForSegment(tw TariffWindow, from, to time.Time) float64 {
-	dur := to.Sub(from)
-	switch tw.Per {
-	case "minute":
-		return tw.Amount * dur.Minutes()
-	case "day":
-		return tw.Amount * (dur.Hours() / 24)
-	default: // "hour"
-		return tw.Amount * dur.Hours()
+func costPerWindow(w TariffWindowSpec, from, to time.Time) float64 {
+	if w.PerSec == 0 {
+		return 0
 	}
-}
-
-func maxTime(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
-	}
-	return b
-}
-func minTime(a, b time.Time) time.Time {
-	if a.Before(b) {
-		return a
-	}
-	return b
+	dur := to.Sub(from).Seconds()
+	return w.Rate * (dur / float64(w.PerSec))
 }
