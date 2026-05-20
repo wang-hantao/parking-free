@@ -211,11 +211,58 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 	}
 
 	verdict.Summary = computeSummary(verdict.Allowed, forbidFired, verdict.NeedsAction)
+	verdict.Reasons = dedupeReasonsByCitation(verdict.Reasons)
 
 	// Enrichment: optional fields populated when the source supports them.
 	e.enrich(ctx, q, &verdict, active)
 
 	return verdict, nil
+}
+
+// dedupeReasonsByCitation collapses Reasons that share the same
+// source.reference. A query within the default 50m radius typically
+// touches several road_segments belonging to one regulation (LTF
+// regulations span multiple street fragments), and our spatial join
+// emits one Rule per segment. Without dedup, the response shows the
+// same citation 4-8 times with identical text, which is noise.
+//
+// When two reasons share a citation we keep the one that's most
+// informative for the verdict outcome — a blocking reason beats a
+// merely supporting one, which beats a neutral one. Reasons with no
+// source reference (e.g. tests without LTF-style attribution) are
+// left untouched.
+func dedupeReasonsByCitation(reasons []domain.Reason) []domain.Reason {
+	seen := map[string]int{} // citation → index in out
+	var out []domain.Reason
+	for _, r := range reasons {
+		key := r.Source.Reference
+		if key == "" {
+			out = append(out, r)
+			continue
+		}
+		if idx, exists := seen[key]; exists {
+			if reasonPreference(r) > reasonPreference(out[idx]) {
+				out[idx] = r
+			}
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, r)
+	}
+	return out
+}
+
+// reasonPreference scores a Reason for dedup tie-breaking. Higher =
+// more informative.
+func reasonPreference(r domain.Reason) int {
+	switch {
+	case r.Blocks:
+		return 2
+	case r.Supports:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func minutesOfDay(t time.Time) int { return t.Hour()*60 + t.Minute() }

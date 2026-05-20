@@ -502,3 +502,111 @@ func TestEvaluate_NoRulesAtAll_DefaultAllowed(t *testing.T) {
 		t.Errorf("unexpected summary: %q", v.Summary)
 	}
 }
+
+// =============================================================================
+// Reason deduplication tests (2.3)
+// =============================================================================
+
+func TestEvaluate_DedupesReasonsByCitation(t *testing.T) {
+	// Three rules all attributing to the same LTF citation — the real
+	// shape when a regulation spans multiple road segments and the
+	// spatial query picks up all of them within the 50m radius.
+	cite := domain.Source{System: "stockholm.ltf-tolken", Reference: "0180 2017-04586"}
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "rule-segA", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:      cite,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "rule-segB", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:      cite,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "rule-segC", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:      cite,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, err := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(v.Reasons) != 1 {
+		t.Errorf("expected 1 deduped reason for shared citation, got %d", len(v.Reasons))
+	}
+	if v.Reasons[0].Source.Reference != cite.Reference {
+		t.Errorf("kept reason should carry the shared citation; got %+v", v.Reasons[0].Source)
+	}
+}
+
+func TestEvaluate_DedupeKeepsBlockingReason(t *testing.T) {
+	// Same citation, but one rule will block (disabled-permit user
+	// without permit) and the other is satisfiable. The blocking
+	// reason is more informative for a not-allowed verdict, so dedup
+	// must keep it. Build the scenario so the disabled permit rule is
+	// in the active set alongside another paid-allow rule.
+	citePermit := domain.Source{System: "stockholm.ltf-tolken", Reference: "0180 2017-02280"}
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "permit-only", Kind: domain.RuleAllow, NeedsPermit: true,
+				Source:      citePermit,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			// Duplicate citation, satisfiable (e.g. cleaner version of
+			// the same rule for a different segment that happens to
+			// share the citation).
+			{
+				ID: "permit-only-dup", Kind: domain.RuleAllow, NeedsPermit: true,
+				Source:      citePermit,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if len(v.Reasons) != 1 {
+		t.Fatalf("expected 1 deduped reason, got %d", len(v.Reasons))
+	}
+	// Verdict is not allowed (only permit rules in scope, user has no permit).
+	if v.Allowed {
+		t.Errorf("expected allowed=false")
+	}
+	// The kept reason should be the blocking one.
+	if !v.Reasons[0].Blocks {
+		t.Errorf("expected the surviving reason to be marked Blocks=true")
+	}
+}
+
+func TestEvaluate_DedupeLeavesEmptyReferencesAlone(t *testing.T) {
+	// Rules without a source reference (e.g. tests or non-LTF sources)
+	// should not collapse onto each other just because they share an
+	// empty key.
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{ID: "a", Kind: domain.RuleAllow, NeedsPayment: true,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}}},
+			{ID: "b", Kind: domain.RuleAllow, NeedsPayment: true,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}}},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if len(v.Reasons) != 2 {
+		t.Errorf("expected 2 reasons (no shared reference to dedup on), got %d", len(v.Reasons))
+	}
+}

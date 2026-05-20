@@ -16,6 +16,12 @@ package postgres
 // and source_reference. These are denormalised onto domain.Rule.Source
 // so the engine can surface them in Reason — the defensible-citation
 // audit trail.
+//
+// All four queries filter out regulations whose effective_to is set
+// and in the past. LTF-Tolken doesn't currently surface withdrawal
+// dates, so this is mostly inert today, but it makes the read path
+// correct ahead of any data source that does (manual overrides,
+// future LTF schema versions, multi-city sources).
 const sqlRulesByZone = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
@@ -26,6 +32,7 @@ JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
 JOIN zone z ON z.id = a.target_id
 WHERE a.target_kind = 'zone'
+  AND (reg.effective_to IS NULL OR reg.effective_to > NOW())
   AND ST_DWithin(
     z.geom::geography,
     ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
@@ -42,6 +49,7 @@ JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
 JOIN parking_area pa ON pa.id = a.target_id
 WHERE a.target_kind = 'parking_area'
+  AND (reg.effective_to IS NULL OR reg.effective_to > NOW())
   AND ST_DWithin(
     pa.geom::geography,
     ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
@@ -58,6 +66,7 @@ JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
 JOIN road_segment rs ON rs.id = a.target_id
 WHERE a.target_kind = 'road_segment'
+  AND (reg.effective_to IS NULL OR reg.effective_to > NOW())
   AND ST_DWithin(
     rs.geom::geography,
     ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
@@ -74,6 +83,7 @@ JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
 JOIN point_of_interest poi ON poi.id = a.target_id
 WHERE a.target_kind = 'poi'
+  AND (reg.effective_to IS NULL OR reg.effective_to > NOW())
   AND ST_DWithin(
     poi.geom::geography,
     ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
