@@ -27,6 +27,30 @@ type RuleSource interface {
 	PermitsForPlate(ctx context.Context, plate string) ([]domain.Permit, error)
 }
 
+// QueryMode selects how the engine resolves which rules apply to the
+// query position.
+//
+//   - QueryModeNearby (the default): rules within RadiusM (50m by
+//     default) are returned. Good for "what's around here" UI views.
+//   - QueryModeStrict: only rules that legally apply to the exact
+//     position. The road-segment match collapses to the single
+//     nearest segment within ~10m; zone/parking_area matches use
+//     ST_Contains; POI matches respect their declared offset only.
+//     This is the right mode for "can I park exactly here right now",
+//     and resolves both the "8 reasons for one query" UX problem and
+//     the bus-spot-false-positive semantic problem.
+//
+// Strict mode requires the source to implement StrictRuleSource. If
+// it doesn't, the engine falls back to RulesNearby and the response
+// won't be strictly accurate — observable via Metadata.Mode reporting
+// the effective mode.
+type QueryMode string
+
+const (
+	QueryModeNearby QueryMode = ""       // default
+	QueryModeStrict QueryMode = "strict" // exact-position resolution
+)
+
 // Query is the input to Evaluate.
 type Query struct {
 	Position domain.Coordinate
@@ -34,6 +58,16 @@ type Query struct {
 	At       time.Time
 	RadiusM  float64       // search radius for nearby rules; 0 means default (50m)
 	Duration time.Duration // optional desired stay; if > 0, EstimatedCost is populated
+	Mode     QueryMode     // QueryModeNearby (default) or QueryModeStrict
+}
+
+// StrictRuleSource is an optional sub-interface that a RuleSource may
+// implement to support QueryModeStrict. The semantic difference from
+// RulesNearby: instead of a radius search, returns only rules that
+// legally apply to the exact position (nearest road segment +
+// containing zone/parking_area + POI within declared offset).
+type StrictRuleSource interface {
+	RulesAt(ctx context.Context, pos domain.Coordinate) ([]domain.Rule, error)
 }
 
 // scoredRule pairs a rule with the time windows that matched at the
@@ -89,7 +123,25 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 		radius = 50
 	}
 
-	nearby, err := e.src.RulesNearby(ctx, q.Position, radius)
+	// Fetch in-scope rules. In strict mode, if the source supports it,
+	// ask for exact-position resolution. Otherwise fall back to a
+	// radius search — the response's Metadata.Mode reflects what was
+	// actually used so clients can detect degradation.
+	var (
+		nearby        []domain.Rule
+		err           error
+		effectiveMode = QueryModeNearby
+	)
+	if q.Mode == QueryModeStrict {
+		if strict, ok := e.src.(StrictRuleSource); ok {
+			nearby, err = strict.RulesAt(ctx, q.Position)
+			effectiveMode = QueryModeStrict
+		} else {
+			nearby, err = e.src.RulesNearby(ctx, q.Position, radius)
+		}
+	} else {
+		nearby, err = e.src.RulesNearby(ctx, q.Position, radius)
+	}
 	if err != nil {
 		return domain.Verdict{}, err
 	}
@@ -212,6 +264,10 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 
 	verdict.Summary = computeSummary(verdict.Allowed, forbidFired, verdict.NeedsAction)
 	verdict.Reasons = dedupeReasonsByCitation(verdict.Reasons)
+
+	// Stamp the effective query mode before enrichment so clients can
+	// detect strict-mode fallback (requested strict, got nearby).
+	verdict.Metadata = &domain.Metadata{Mode: string(effectiveMode)}
 
 	// Enrichment: optional fields populated when the source supports them.
 	e.enrich(ctx, q, &verdict, active)

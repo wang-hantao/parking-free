@@ -90,12 +90,23 @@ func parseAllowedQuery(r *http.Request) (engine.Query, error) {
 		duration = time.Duration(m) * time.Minute
 	}
 
+	var mode engine.QueryMode
+	switch v.Get("mode") {
+	case "", "nearby":
+		mode = engine.QueryModeNearby
+	case "strict":
+		mode = engine.QueryModeStrict
+	default:
+		return engine.Query{}, errors.New("invalid mode; expected 'nearby' or 'strict'")
+	}
+
 	return engine.Query{
 		Position: domain.Coordinate{Lat: lat, Lng: lng},
 		Vehicle:  domain.Vehicle{Plate: plate, Class: class},
 		At:       at,
 		RadiusM:  radius,
 		Duration: duration,
+		Mode:     mode,
 	}, nil
 }
 

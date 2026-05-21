@@ -83,6 +83,11 @@ curl 'http://localhost:8080/allowed?lat=59.3330&lng=18.0681&plate=ABC123'
 
 # With duration to get an estimated_cost block in the response:
 curl 'http://localhost:8080/allowed?lat=59.3330&lng=18.0681&plate=ABC123&duration_minutes=180'
+
+# Strict mode — only rules that legally apply to the exact position.
+# Cuts noise from nearby segments and resolves false-positives like
+# a bus-only spot 30m away firing on a car query:
+curl 'http://localhost:8080/allowed?lat=59.3373&lng=18.0802&plate=ABC123&mode=strict'
 ```
 
 The `/allowed` endpoint will return a default-allow response with no
@@ -92,6 +97,16 @@ the Stureplan demo dataset and see the full response shape — including
 `constraints` (max stay, payment required), `warnings` (max stay
 expiring), and — when `duration_minutes` is supplied — `estimated_cost`
 with a per-window breakdown.
+
+The `mode` query parameter selects how rules are resolved:
+
+- `mode=nearby` (default): rules within `radius` metres (50m default).
+  Returns wider context — useful for "what's around here" views.
+- `mode=strict`: rules that legally apply to the exact point — the
+  single nearest road segment within 10m, plus zones and parking
+  areas containing the point, plus POI rules within their declared
+  offset. Use this for "can I park exactly here right now?". The
+  response's `metadata.mode` reports the effective mode.
 
 To run actual ingestion against LTF-Tolken:
 

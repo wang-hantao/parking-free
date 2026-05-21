@@ -610,3 +610,121 @@ func TestEvaluate_DedupeLeavesEmptyReferencesAlone(t *testing.T) {
 		t.Errorf("expected 2 reasons (no shared reference to dedup on), got %d", len(v.Reasons))
 	}
 }
+
+// =============================================================================
+// Strict-mode tests (3.1)
+// =============================================================================
+
+// strictSource implements both RuleSource and StrictRuleSource so we
+// can exercise the engine's branching. The two methods return
+// different sets so tests can assert which path was taken.
+type strictSource struct {
+	nearby []domain.Rule // returned by RulesNearby
+	at     []domain.Rule // returned by RulesAt (strict mode)
+}
+
+func (s *strictSource) RulesNearby(_ context.Context, _ domain.Coordinate, _ float64) ([]domain.Rule, error) {
+	return s.nearby, nil
+}
+func (s *strictSource) RulesAt(_ context.Context, _ domain.Coordinate) ([]domain.Rule, error) {
+	return s.at, nil
+}
+func (s *strictSource) PermitsForPlate(_ context.Context, _ string) ([]domain.Permit, error) {
+	return nil, nil
+}
+
+func TestEvaluate_StrictMode_UsesRulesAt(t *testing.T) {
+	src := &strictSource{
+		nearby: []domain.Rule{
+			{
+				ID: "wide-net", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:      domain.Source{System: "test", Reference: "wide"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		at: []domain.Rule{
+			{
+				ID: "exact", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:      domain.Source{System: "test", Reference: "exact"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, err := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+		Mode:    QueryModeStrict,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(v.Reasons) != 1 || v.Reasons[0].Source.Reference != "exact" {
+		t.Errorf("strict mode should use RulesAt; got reasons %+v", v.Reasons)
+	}
+	if v.Metadata == nil || v.Metadata.Mode != "strict" {
+		t.Errorf("Metadata.Mode: want strict, got %+v", v.Metadata)
+	}
+}
+
+func TestEvaluate_NearbyMode_UsesRulesNearby(t *testing.T) {
+	src := &strictSource{
+		nearby: []domain.Rule{
+			{
+				ID: "wide-net", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:      domain.Source{System: "test", Reference: "wide"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		at: []domain.Rule{
+			{
+				ID: "exact", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:      domain.Source{System: "test", Reference: "exact"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+		Mode:    QueryModeNearby, // explicit default
+	})
+	if len(v.Reasons) != 1 || v.Reasons[0].Source.Reference != "wide" {
+		t.Errorf("nearby mode should use RulesNearby; got reasons %+v", v.Reasons)
+	}
+	if v.Metadata == nil || v.Metadata.Mode != "" {
+		t.Errorf("Metadata.Mode: want empty for nearby, got %+v", v.Metadata)
+	}
+}
+
+func TestEvaluate_StrictMode_FallsBackWhenSourceDoesntImplement(t *testing.T) {
+	// fakeSource (used by other tests) is plain RuleSource — no
+	// StrictRuleSource. Requesting strict mode should not error; it
+	// should silently fall back to RulesNearby, and Metadata.Mode
+	// reports the effective mode so the client can detect.
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "r1", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:      domain.Source{System: "test", Reference: "0180 2017-99999"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, err := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+		Mode:    QueryModeStrict,
+	})
+	if err != nil {
+		t.Fatalf("strict-without-support should not error: %v", err)
+	}
+	if v.Metadata == nil || v.Metadata.Mode != "" {
+		t.Errorf("Metadata.Mode: want empty (fallback), got %+v", v.Metadata)
+	}
+	if len(v.Reasons) != 1 {
+		t.Errorf("fallback should still return the rule via RulesNearby; got %d reasons", len(v.Reasons))
+	}
+}

@@ -40,11 +40,16 @@ type HazardSource interface {
 // enrich populates the optional fields of v based on whatever sub-
 // interfaces the source implements. Errors from individual enrichers
 // are non-fatal: the rest of the verdict is still returned.
+//
+// Metadata is populated here only when the caller hasn't already set
+// it (so Evaluate can stamp the effective query mode before enriching
+// without it being clobbered).
 func (e *Evaluator) enrich(ctx context.Context, q Query, v *domain.Verdict, active []scoredRule) {
-	v.Metadata = &domain.Metadata{
-		EvaluatedAt:   q.At,
-		EngineVersion: EngineVersion,
+	if v.Metadata == nil {
+		v.Metadata = &domain.Metadata{}
 	}
+	v.Metadata.EvaluatedAt = q.At
+	v.Metadata.EngineVersion = EngineVersion
 
 	// Constraints come straight from the active rules — no source needed.
 	v.Constraints = constraintsFromRules(active)

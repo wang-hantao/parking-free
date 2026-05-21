@@ -106,6 +106,72 @@ func (s *Store) RulesNearby(ctx context.Context, pos domain.Coordinate, radiusM 
 	return rules, nil
 }
 
+// nearestSegmentToleranceM is the max distance from a query point to
+// the nearest road segment that strict-mode resolution will accept.
+// Stockholm LTF geometries trace the curb; queries on the parking
+// strip are typically 2-4m off. 10m comfortably covers GPS noise
+// without crossing the street.
+const nearestSegmentToleranceM = 10.0
+
+// RulesAt is the strict-mode counterpart to RulesNearby. It returns
+// only rules that legally apply to the exact position:
+//   - road_segment: the single nearest segment within
+//     nearestSegmentToleranceM metres (instead of all segments in a
+//     wider radius)
+//   - zone: ST_Contains (point inside the polygon)
+//   - parking_area: ST_Contains
+//   - POI: rules within their declared offset extent (no extra
+//     search radius)
+//
+// Implements engine.StrictRuleSource. The engine calls this only when
+// the client requested Mode=strict.
+func (s *Store) RulesAt(ctx context.Context, pos domain.Coordinate) ([]domain.Rule, error) {
+	// All four queries take ($1=lng, $2=lat, $3=radius). For the
+	// nearest-segment query, $3 is the tolerance. For the others,
+	// $3=0 leaves only the per-rule offset extent contributing to
+	// distance — i.e. true containment for polygons, offset-only for
+	// POIs.
+	type fetch struct {
+		sql    string
+		radius float64
+	}
+	fetches := []fetch{
+		{sqlRulesByZone, 0},
+		{sqlRulesByParkingArea, 0},
+		{sqlRulesByNearestSegment, nearestSegmentToleranceM},
+		{sqlRulesByPOI, 0},
+	}
+
+	seen := map[string]int{}
+	var rules []domain.Rule
+	for _, f := range fetches {
+		rs, err := s.fetchRules(ctx, f.sql, pos.Lng, pos.Lat, f.radius)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: rules-at: %w", err)
+		}
+		for _, r := range rs {
+			if _, ok := seen[r.ID]; ok {
+				continue
+			}
+			seen[r.ID] = len(rules)
+			rules = append(rules, r)
+		}
+	}
+
+	if len(rules) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, 0, len(rules))
+	for _, r := range rules {
+		ids = append(ids, r.ID)
+	}
+	if err := s.hydrateTimeWindows(ctx, rules, seen, ids); err != nil {
+		return nil, fmt.Errorf("postgres: hydrate windows: %w", err)
+	}
+	return rules, nil
+}
+
 func (s *Store) fetchRules(ctx context.Context, query string, lng, lat, radius float64) ([]domain.Rule, error) {
 	rows, err := s.pool.Query(ctx, query, lng, lat, radius)
 	if err != nil {

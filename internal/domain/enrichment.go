@@ -104,4 +104,10 @@ type CostSegment struct {
 type Metadata struct {
 	EvaluatedAt   time.Time `json:"evaluated_at"`
 	EngineVersion string    `json:"engine_version"`
+	// Mode reflects the effective query mode used to resolve rules:
+	// "" for nearby (default radius search), "strict" for exact-
+	// position resolution. If the client requested "strict" but the
+	// data source doesn't support it, this surfaces "" so the client
+	// can detect the fallback.
+	Mode string `json:"mode,omitempty"`
 }
