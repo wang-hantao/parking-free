@@ -60,6 +60,14 @@ type Rule struct {
 	// PARKING_RATE) leave it empty. Resolved at enrichment time, not
 	// stored on disk beyond this column.
 	TariffClassCode string `json:"tariff_class_code,omitempty"`
+
+	// RequiredPermitKind names the specific permit kind needed to
+	// satisfy this rule when NeedsPermit=true. Empty means any
+	// permit valid at query time satisfies — the v1 behaviour kept
+	// for sources that don't differentiate. When set, a query
+	// without a matching permit kind is treated as unsatisfied even
+	// if other permits are on the plate.
+	RequiredPermitKind PermitKind `json:"required_permit_kind,omitempty"`
 }
 
 // MatchesVehicle returns true if this rule applies to the given vehicle.
@@ -100,6 +108,18 @@ type TimeWindow struct {
 	EndMin      int     `json:"end_min"`
 	DateFrom    string  `json:"date_from,omitempty"` // optional YYYY-MM-DD seasonal limit
 	DateTo      string  `json:"date_to,omitempty"`
+
+	// Recurring annual range using month+day pairs (1-based). Used
+	// when a rule's calendar range repeats every year — Stockholm's
+	// pmotorcykel features encode this for summer relaxations. All
+	// four fields must be set together; 0 means "no seasonal
+	// filter". When end (month,day) comes before start in the year,
+	// the window wraps across the year boundary (e.g. Aug 16 →
+	// June 14 means "all year except mid-summer").
+	StartMonth int `json:"start_month,omitempty"`
+	StartDay   int `json:"start_day,omitempty"`
+	EndMonth   int `json:"end_month,omitempty"`
+	EndDay     int `json:"end_day,omitempty"`
 }
 
 // AppliesToKind indicates what geometric target a rule binds to.

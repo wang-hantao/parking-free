@@ -137,13 +137,21 @@ domain Rules. The transforms preserve the LTF citation as the
 regulation source-reference, so every rule is traceable back to its
 RDT decision URL.
 
-Some pmotorcykel features carry seasonal date-range fields
-(`START_MONTH`/`END_MONTH`/`START_DAY`/`END_DAY`) that describe rules
-which vary by season (e.g. no street cleaning in summer). The engine
-doesn't yet honour `TimeWindow.DateFrom`/`DateTo`, so those features
-are counted in `features_skipped` in the ingester log and not
-persisted. Roughly 40% of pmotorcykel features carry this pattern;
-adding engine-side seasonal-date support is a separate follow-up.
+Pmotorcykel features can carry seasonal date-range fields
+(`START_MONTH`/`END_MONTH`/`START_DAY`/`END_DAY`) describing rules
+that vary by season (e.g. no street cleaning in summer). The engine
+honours these via four nullable month/day columns on
+`rule_time_window`, including cross-year wraps (Aug 16 → Jun 14,
+i.e. "everything except summer"). About 40% of pmotorcykel features
+use this pattern; all are now ingested.
+
+Disabled-only spots (`prorelsehindrad`, and ptillaten features whose
+`VF_PLATS_TYP` mentions "rörelsehindrad") carry
+`RequiredPermitKind="disabled"`. The engine's satisfiability check
+now filters by kind: a user with a residential permit on the plate
+will see `allowed=false` at a disabled-only spot, with `needs_action`
+listing `obtain_permit` and the reason text mentioning the specific
+permit kind.
 
 ### Schema inspection
 

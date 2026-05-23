@@ -26,7 +26,8 @@ const sqlRulesByZone = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
        reg.source_system, COALESCE(reg.source_reference, ''),
-       COALESCE(r.tariff_class_code, '')
+       COALESCE(r.tariff_class_code, ''),
+       COALESCE(r.required_permit_kind, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -43,7 +44,8 @@ const sqlRulesByParkingArea = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
        reg.source_system, COALESCE(reg.source_reference, ''),
-       COALESCE(r.tariff_class_code, '')
+       COALESCE(r.tariff_class_code, ''),
+       COALESCE(r.required_permit_kind, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -60,7 +62,8 @@ const sqlRulesByRoadSegment = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
        reg.source_system, COALESCE(reg.source_reference, ''),
-       COALESCE(r.tariff_class_code, '')
+       COALESCE(r.tariff_class_code, ''),
+       COALESCE(r.required_permit_kind, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -99,7 +102,8 @@ WITH nearest AS (
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
        reg.source_system, COALESCE(reg.source_reference, ''),
-       COALESCE(r.tariff_class_code, '')
+       COALESCE(r.tariff_class_code, ''),
+       COALESCE(r.required_permit_kind, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -111,7 +115,8 @@ const sqlRulesByPOI = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
        reg.source_system, COALESCE(reg.source_reference, ''),
-       COALESCE(r.tariff_class_code, '')
+       COALESCE(r.tariff_class_code, ''),
+       COALESCE(r.required_permit_kind, '')
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
@@ -126,7 +131,9 @@ WHERE a.target_kind = 'poi'
 
 const sqlTimeWindowsForRules = `
 SELECT rule_id::text, weekday_mask, COALESCE(day_type, ''),
-       start_min, end_min
+       start_min, end_min,
+       COALESCE(start_month, 0), COALESCE(start_day, 0),
+       COALESCE(end_month, 0), COALESCE(end_day, 0)
 FROM rule_time_window
 WHERE rule_id = ANY($1)`
 
@@ -220,13 +227,16 @@ const sqlDeleteRulesForRegulation = `DELETE FROM rule WHERE regulation_id = $1`
 const sqlInsertRule = `
 INSERT INTO rule
   (id, regulation_id, kind, max_duration_s, needs_payment, needs_permit,
-   vehicle_classes, priority, tariff_class_code)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''))`
+   vehicle_classes, priority, tariff_class_code, required_permit_kind)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''))`
 
 const sqlInsertTimeWindow = `
 INSERT INTO rule_time_window
-  (rule_id, weekday_mask, day_type, start_min, end_min, date_from, date_to)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`
+  (rule_id, weekday_mask, day_type, start_min, end_min,
+   date_from, date_to,
+   start_month, start_day, end_month, end_day)
+VALUES ($1, $2, $3, $4, $5, $6, $7,
+        NULLIF($8, 0), NULLIF($9, 0), NULLIF($10, 0), NULLIF($11, 0))`
 
 const sqlInsertAppliesTo = `
 INSERT INTO rule_applies_to

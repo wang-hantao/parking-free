@@ -728,3 +728,256 @@ func TestEvaluate_StrictMode_FallsBackWhenSourceDoesntImplement(t *testing.T) {
 		t.Errorf("fallback should still return the rule via RulesNearby; got %d reasons", len(v.Reasons))
 	}
 }
+
+// =============================================================================
+// Required-permit-kind tests (2.2)
+// =============================================================================
+
+func TestEvaluate_RequiredPermitKind_WrongKindIsUnsatisfied(t *testing.T) {
+	// User has a residential permit; rule requires a disabled permit.
+	// Verdict: not allowed (the residential permit doesn't satisfy
+	// the disabled-only requirement).
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "disabled-only", Kind: domain.RuleAllow, NeedsPermit: true,
+				RequiredPermitKind: domain.PermitDisabled,
+				Source:             domain.Source{System: "test", Reference: "0180 2017-02280"},
+				TimeWindows:        []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		permits: map[string][]domain.Permit{
+			"ABC123": {{
+				Kind:      domain.PermitResidential, // wrong kind!
+				Plate:     "ABC123",
+				ValidFrom: now.Add(-24 * time.Hour),
+				ValidTo:   now.Add(24 * time.Hour),
+			}},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if v.Allowed {
+		t.Errorf("residential permit must not satisfy a disabled-only rule")
+	}
+	if !contains(v.NeedsAction, "obtain_permit") {
+		t.Errorf("expected obtain_permit in needs_action; got %v", v.NeedsAction)
+	}
+}
+
+func TestEvaluate_RequiredPermitKind_RightKindIsSatisfied(t *testing.T) {
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "disabled-only", Kind: domain.RuleAllow, NeedsPermit: true,
+				RequiredPermitKind: domain.PermitDisabled,
+				TimeWindows:        []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		permits: map[string][]domain.Permit{
+			"ABC123": {{
+				Kind:      domain.PermitDisabled, // matches!
+				Plate:     "ABC123",
+				ValidFrom: now.Add(-24 * time.Hour),
+				ValidTo:   now.Add(24 * time.Hour),
+			}},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if !v.Allowed {
+		t.Errorf("disabled permit should satisfy a disabled-only rule")
+	}
+	if contains(v.NeedsAction, "obtain_permit") {
+		t.Errorf("obtain_permit should not appear when user has the right permit")
+	}
+}
+
+func TestEvaluate_RequiredPermitKind_EmptyKindAcceptsAnyPermit(t *testing.T) {
+	// Backward compatibility: rules whose RequiredPermitKind is empty
+	// continue accepting any permit on the plate (v1 behaviour).
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "any-permit-ok", Kind: domain.RuleAllow, NeedsPermit: true,
+				// RequiredPermitKind unset → any kind satisfies.
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		permits: map[string][]domain.Permit{
+			"ABC123": {{
+				Kind:      domain.PermitResidential,
+				Plate:     "ABC123",
+				ValidFrom: now.Add(-24 * time.Hour),
+				ValidTo:   now.Add(24 * time.Hour),
+			}},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if !v.Allowed {
+		t.Errorf("any permit should satisfy a rule with no RequiredPermitKind")
+	}
+}
+
+func TestEvaluate_RequiredPermitKind_HumaniseMentionsTheKind(t *testing.T) {
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "d", Kind: domain.RuleAllow, NeedsPermit: true,
+				RequiredPermitKind: domain.PermitDisabled,
+				Source:             domain.Source{System: "test", Reference: "X"},
+				TimeWindows:        []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if len(v.Reasons) != 1 {
+		t.Fatalf("expected 1 reason, got %d", len(v.Reasons))
+	}
+	got := v.Reasons[0].HumanReadable
+	want := "disabled-parking permit"
+	if !contains([]string{got}, want) {
+		// Loose match — the phrase appears somewhere in the sentence.
+		if !containsSubstring(got, want) {
+			t.Errorf("humanise should mention %q; got %q", want, got)
+		}
+	}
+}
+
+func containsSubstring(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// =============================================================================
+// Seasonal date-range tests
+// =============================================================================
+
+func TestInSeasonalRange_Unset_AlwaysMatches(t *testing.T) {
+	w := domain.TimeWindow{} // all month/day fields zero
+	cases := []time.Time{
+		atUTC(2026, 1, 1, 12, 0),
+		atUTC(2026, 6, 15, 12, 0),
+		atUTC(2026, 12, 31, 12, 0),
+	}
+	for _, at := range cases {
+		if !inSeasonalRange(at, w) {
+			t.Errorf("unset seasonal range should match %s", at)
+		}
+	}
+}
+
+func TestInSeasonalRange_MidYearRange(t *testing.T) {
+	// June 15 – August 15.
+	w := domain.TimeWindow{StartMonth: 6, StartDay: 15, EndMonth: 8, EndDay: 15}
+	cases := []struct {
+		at    time.Time
+		match bool
+	}{
+		{atUTC(2026, 5, 30, 12, 0), false}, // before
+		{atUTC(2026, 6, 15, 12, 0), true},  // inclusive start
+		{atUTC(2026, 7, 4, 12, 0), true},   // inside
+		{atUTC(2026, 8, 15, 12, 0), true},  // inclusive end
+		{atUTC(2026, 8, 16, 12, 0), false}, // after
+		{atUTC(2027, 7, 1, 12, 0), true},   // next year, still in season
+	}
+	for _, c := range cases {
+		if got := inSeasonalRange(c.at, w); got != c.match {
+			t.Errorf("inSeasonalRange(%s, Jun15-Aug15): want %v, got %v", c.at.Format("2006-01-02"), c.match, got)
+		}
+	}
+}
+
+func TestInSeasonalRange_CrossYearWrap(t *testing.T) {
+	// August 16 – June 14 (everything except summer).
+	w := domain.TimeWindow{StartMonth: 8, StartDay: 16, EndMonth: 6, EndDay: 14}
+	cases := []struct {
+		at    time.Time
+		match bool
+	}{
+		{atUTC(2026, 6, 14, 12, 0), true},  // inclusive end
+		{atUTC(2026, 6, 15, 12, 0), false}, // start of summer gap
+		{atUTC(2026, 7, 4, 12, 0), false},  // middle of summer gap
+		{atUTC(2026, 8, 15, 12, 0), false}, // last day of gap
+		{atUTC(2026, 8, 16, 12, 0), true},  // inclusive start
+		{atUTC(2026, 12, 31, 12, 0), true}, // late winter
+		{atUTC(2027, 1, 15, 12, 0), true},  // next year, still in season
+	}
+	for _, c := range cases {
+		if got := inSeasonalRange(c.at, w); got != c.match {
+			t.Errorf("inSeasonalRange(%s, Aug16-Jun14): want %v, got %v", c.at.Format("2006-01-02"), c.match, got)
+		}
+	}
+}
+
+func TestEvaluate_SeasonalWindow_OutsideRangeIsNotActive(t *testing.T) {
+	// A rule that only fires June 15 – August 15. Query at May 7 →
+	// rule not active, so allowed=true by default.
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "summer-only", Kind: domain.RuleForbid,
+				Source: domain.Source{System: "test", Reference: "X"},
+				TimeWindows: []domain.TimeWindow{{
+					WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440,
+					StartMonth: 6, StartDay: 15, EndMonth: 8, EndDay: 15,
+				}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0), // May — out of season
+	})
+	if !v.Allowed {
+		t.Errorf("out-of-season Forbid should not fire; got allowed=false")
+	}
+	if len(v.Reasons) != 0 {
+		t.Errorf("expected no reasons (rule inactive), got %d", len(v.Reasons))
+	}
+}
+
+func TestEvaluate_SeasonalWindow_InsideRangeIsActive(t *testing.T) {
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "summer-only", Kind: domain.RuleForbid,
+				Source: domain.Source{System: "test", Reference: "X"},
+				TimeWindows: []domain.TimeWindow{{
+					WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440,
+					StartMonth: 6, StartDay: 15, EndMonth: 8, EndDay: 15,
+				}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 7, 4, 12, 0), // July — in season
+	})
+	if v.Allowed {
+		t.Errorf("in-season Forbid should fire; got allowed=true")
+	}
+}

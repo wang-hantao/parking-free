@@ -254,19 +254,27 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 		needsPayment := strings.Contains(typ, "avgift")
 		needsPermit := strings.Contains(typ, "rörelsehindrad") ||
 			strings.Contains(vehicle, "rörelsehindrad")
+		var permitKind domain.PermitKind
+		if needsPermit {
+			permitKind = domain.PermitDisabled
+		}
 
 		startHHMM := propInt(props, "START_TIME")
 		endHHMM := propInt(props, "END_TIME")
 		weekday := propStr(props, "START_WEEKDAY")
 
+		tw := buildTimeWindow(weekday, startHHMM, endHHMM)
+		applySeasonalRange(&tw, props)
+
 		batch.Rules = append(batch.Rules, domain.Rule{
-			RegulationID:    citation, // placeholder
-			Kind:            domain.RuleAllow,
-			Priority:        5, // lower than servicedagar (10), so cleaning wins on overlap
-			NeedsPayment:    needsPayment,
-			NeedsPermit:     needsPermit,
-			TariffClassCode: parseTaxaCode(propStr(props, "PARKING_RATE")),
-			TimeWindows:     []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
+			RegulationID:       citation, // placeholder
+			Kind:               domain.RuleAllow,
+			Priority:           5, // lower than servicedagar (10), so cleaning wins on overlap
+			NeedsPayment:       needsPayment,
+			NeedsPermit:        needsPermit,
+			RequiredPermitKind: permitKind,
+			TariffClassCode:    parseTaxaCode(propStr(props, "PARKING_RATE")),
+			TimeWindows:        []domain.TimeWindow{tw},
 			AppliesTo: []domain.AppliesTo{{
 				Kind:     domain.TargetRoadSegment,
 				TargetID: segRef, // placeholder
@@ -290,18 +298,16 @@ type reservedSpotConfig struct {
 	pathPrefix   string              // for road_segment source_reference (e.g. "pbuss")
 	vehicleClass domain.VehicleClass // empty when permit-based rather than class-based
 	needsPermit  bool                // true for prorelsehindrad (disabled placard)
+	permitKind   domain.PermitKind   // set when needsPermit=true and the kind is known
 }
 
 // reservedSpotConfigs maps each reserved-class föreskrift to its
-// vehicle-class / permit configuration. plastbil, pmotorcykel and
-// prorelsehindrad entries are populated based on pattern inference
-// but NOT yet wired in the Transform() switch — enable them only
-// after confirming their JSON shapes match the pbuss pattern.
+// vehicle-class / permit configuration.
 var reservedSpotConfigs = map[Foreskrift]reservedSpotConfig{
-	PBuss:           {PBuss, "pbuss", domain.VehicleBus, false},
-	PLastbil:        {PLastbil, "plastbil", domain.VehicleTruck, false},
-	PMotorcykel:     {PMotorcykel, "pmotorcykel", domain.VehicleMotorcycle, false},
-	PRorelsehindrad: {PRorelsehindrad, "prorelsehindrad", "", true},
+	PBuss:           {PBuss, "pbuss", domain.VehicleBus, false, ""},
+	PLastbil:        {PLastbil, "plastbil", domain.VehicleTruck, false, ""},
+	PMotorcykel:     {PMotorcykel, "pmotorcykel", domain.VehicleMotorcycle, false, ""},
+	PRorelsehindrad: {PRorelsehindrad, "prorelsehindrad", "", true, domain.PermitDisabled},
 }
 
 // transformReservedSpot converts each feature into:
@@ -325,21 +331,6 @@ func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *Ingest
 
 	for _, feat := range fc.Features {
 		props := feat.Properties
-
-		// Seasonal date-range features (START_MONTH/END_MONTH/...) carry
-		// the rule's calendar window in month+day pairs. The engine
-		// doesn't currently honour TimeWindow.DateFrom/DateTo, so a
-		// naïve ingest would either fire the rule year-round (wrong)
-		// or drop the calendar context silently. We skip them and
-		// surface the count via IngestBatch.SkippedFeatures so the
-		// gap is quantifiable. Affects ~40% of pmotorcykel features
-		// (Stockholm relaxes MC cleaning rules in summer); other
-		// reserved-class föreskrifter rarely use this pattern.
-		if propInt(props, "START_MONTH") != 0 || propInt(props, "END_MONTH") != 0 ||
-			propInt(props, "START_DAY") != 0 || propInt(props, "END_DAY") != 0 {
-			batch.SkippedFeatures++
-			continue
-		}
 
 		citation := propStr(props, "CITATION")
 		fid := propInt(props, "FID")
@@ -404,16 +395,22 @@ func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *Ingest
 		typ := strings.ToLower(propStr(props, "VF_PLATS_TYP"))
 		needsPayment := strings.Contains(typ, "avgift") || strings.Contains(typ, "boende")
 
+		// Build the time window, layering seasonal month/day onto
+		// the weekday + time-of-day. Engine now honours all of these.
+		tw := buildTimeWindow(weekday, startHHMM, endHHMM)
+		applySeasonalRange(&tw, props)
+
 		batch.Rules = append(batch.Rules, domain.Rule{
-			RegulationID:    citation, // placeholder
-			Kind:            domain.RuleAllow,
-			Priority:        5,
-			VehicleClasses:  classes,
-			NeedsPayment:    needsPayment,
-			NeedsPermit:     cfg.needsPermit,
-			MaxDuration:     maxDur,
-			TariffClassCode: parseTaxaCode(propStr(props, "PARKING_RATE")),
-			TimeWindows:     []domain.TimeWindow{buildTimeWindow(weekday, startHHMM, endHHMM)},
+			RegulationID:       citation, // placeholder
+			Kind:               domain.RuleAllow,
+			Priority:           5,
+			VehicleClasses:     classes,
+			NeedsPayment:       needsPayment,
+			NeedsPermit:        cfg.needsPermit,
+			RequiredPermitKind: cfg.permitKind,
+			MaxDuration:        maxDur,
+			TariffClassCode:    parseTaxaCode(propStr(props, "PARKING_RATE")),
+			TimeWindows:        []domain.TimeWindow{tw},
 			AppliesTo: []domain.AppliesTo{{
 				Kind:     domain.TargetRoadSegment,
 				TargetID: segRef, // placeholder
@@ -571,4 +568,23 @@ func parseTaxaCode(rate string) string {
 		return ""
 	}
 	return "stockholm.taxa." + m[1]
+}
+
+// applySeasonalRange copies LTF month/day fields (when set) onto a
+// TimeWindow's seasonal range. Engine matchingWindows now honours
+// these, so the previously-skipped pmotorcykel features become
+// expressible. When none of the four fields are set, the window is
+// left unrestricted by season (the common case).
+func applySeasonalRange(w *domain.TimeWindow, props map[string]interface{}) {
+	sm := propInt(props, "START_MONTH")
+	em := propInt(props, "END_MONTH")
+	sd := propInt(props, "START_DAY")
+	ed := propInt(props, "END_DAY")
+	if sm == 0 && em == 0 && sd == 0 && ed == 0 {
+		return
+	}
+	w.StartMonth = sm
+	w.StartDay = sd
+	w.EndMonth = em
+	w.EndDay = ed
 }

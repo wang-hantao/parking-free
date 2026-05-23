@@ -186,15 +186,18 @@ func (s *Store) fetchRules(ctx context.Context, query string, lng, lat, radius f
 			maxDurSec *int
 			classes   []string
 		)
+		var permitKindStr string
 		if err := rows.Scan(
 			&r.ID, &r.RegulationID, &r.Kind,
 			&maxDurSec, &r.NeedsPayment, &r.NeedsPermit,
 			&classes, &r.Priority,
 			&r.Source.System, &r.Source.Reference,
 			&r.TariffClassCode,
+			&permitKindStr,
 		); err != nil {
 			return nil, err
 		}
+		r.RequiredPermitKind = domain.PermitKind(permitKindStr)
 		if maxDurSec != nil {
 			r.MaxDuration = time.Duration(*maxDurSec) * time.Second
 		}
@@ -218,7 +221,8 @@ func (s *Store) hydrateTimeWindows(ctx context.Context, rules []domain.Rule, idx
 			tw      domain.TimeWindow
 			dayType string
 		)
-		if err := rows.Scan(&ruleID, &tw.WeekdayMask, &dayType, &tw.StartMin, &tw.EndMin); err != nil {
+		if err := rows.Scan(&ruleID, &tw.WeekdayMask, &dayType, &tw.StartMin, &tw.EndMin,
+			&tw.StartMonth, &tw.StartDay, &tw.EndMonth, &tw.EndDay); err != nil {
 			return err
 		}
 		tw.DayType = domain.DayType(dayType)
@@ -466,7 +470,7 @@ func (s *Store) UpsertRules(ctx context.Context, rules []domain.Rule) error {
 				if _, err := tx.Exec(ctx, sqlInsertRule,
 					r.ID, r.RegulationID, string(r.Kind), maxDurSec,
 					r.NeedsPayment, r.NeedsPermit, classes, r.Priority,
-					r.TariffClassCode,
+					r.TariffClassCode, string(r.RequiredPermitKind),
 				); err != nil {
 					return fmt.Errorf("insert rule %s: %w", r.ID, err)
 				}
@@ -484,6 +488,7 @@ func (s *Store) UpsertRules(ctx context.Context, rules []domain.Rule) error {
 					}
 					if _, err := tx.Exec(ctx, sqlInsertTimeWindow,
 						r.ID, w.WeekdayMask, dayType, w.StartMin, w.EndMin, dateFrom, dateTo,
+						w.StartMonth, w.StartDay, w.EndMonth, w.EndDay,
 					); err != nil {
 						return fmt.Errorf("insert time window for rule %s: %w", r.ID, err)
 					}

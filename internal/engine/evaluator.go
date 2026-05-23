@@ -175,8 +175,6 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 		ExpiresAt: q.At.Add(24 * time.Hour),
 	}
 
-	hasPermit := hasMatchingPermit(permits, q.At)
-
 	// Two-pass build: first construct all reasons and track which Allow
 	// rules are satisfiable by this user; then determine Allowed and
 	// the Blocks flag on each reason from the aggregate state.
@@ -209,7 +207,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 			allowExists = true
 			sr.isAllow = true
 			sr.satisfiable = true
-			if s.rule.NeedsPermit && !hasPermit {
+			if s.rule.NeedsPermit && !ruleSatisfiedByPermits(s.rule, permits, q.At) {
 				verdict.NeedsAction = appendUnique(verdict.NeedsAction, "obtain_permit")
 				sr.satisfiable = false
 				sr.needsPermit = true
@@ -336,9 +334,36 @@ func matchingWindows(ws []domain.TimeWindow, at time.Time, dt domain.DayType, to
 		if !inTimeRange(tod, w.StartMin, w.EndMin) {
 			continue
 		}
+		if !inSeasonalRange(at, w) {
+			continue
+		}
 		out = append(out, w)
 	}
 	return out
+}
+
+// inSeasonalRange tests whether the date (month + day-of-month of
+// `at`) falls inside the window's recurring annual range.
+//
+// When the four month/day fields are unset (all zero), no seasonal
+// filter applies. Otherwise:
+//   - start <= end (within the same year, e.g. Jun 15 → Aug 15):
+//     match iff start <= (mm,dd) <= end
+//   - start > end (cross-year, e.g. Aug 16 → Jun 14): match iff
+//     (mm,dd) >= start OR (mm,dd) <= end
+//
+// (mm,dd) pairs compare lexicographically by packing into mm*100+dd.
+func inSeasonalRange(at time.Time, w domain.TimeWindow) bool {
+	if w.StartMonth == 0 && w.EndMonth == 0 {
+		return true
+	}
+	start := w.StartMonth*100 + w.StartDay
+	end := w.EndMonth*100 + w.EndDay
+	cur := int(at.Month())*100 + at.Day()
+	if start <= end {
+		return cur >= start && cur <= end
+	}
+	return cur >= start || cur <= end
 }
 
 func inTimeRange(tod, start, end int) bool {
@@ -368,6 +393,27 @@ func nextWindowBoundary(at time.Time, ws []domain.TimeWindow) time.Time {
 	return best
 }
 
+// ruleSatisfiedByPermits reports whether the user's permits include
+// one that satisfies the rule's permit requirement at `at`. If the
+// rule names a specific RequiredPermitKind, only permits of that kind
+// count. If the field is empty, any valid permit on the plate
+// satisfies (the v1 behaviour kept for sources that don't tag kinds).
+func ruleSatisfiedByPermits(r domain.Rule, ps []domain.Permit, at time.Time) bool {
+	for _, p := range ps {
+		if !p.IsValidAt(at) {
+			continue
+		}
+		if r.RequiredPermitKind != "" && p.Kind != r.RequiredPermitKind {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// hasMatchingPermit is retained for callers that don't need per-rule
+// kind matching (none in the current codebase, but it's part of the
+// engine's small helper surface).
 func hasMatchingPermit(ps []domain.Permit, at time.Time) bool {
 	for _, p := range ps {
 		if p.IsValidAt(at) {
@@ -428,7 +474,8 @@ func containsString(s []string, v string) bool {
 // humanise produces a brief human-readable description of a rule.
 // In production this would be a templated, localised renderer; the
 // stub here at least distinguishes the four combinations of
-// NeedsPayment × NeedsPermit so the reasons array isn't ambiguous.
+// NeedsPayment × NeedsPermit so the reasons array isn't ambiguous,
+// and surfaces the required permit kind when one is set.
 func humanise(r domain.Rule) string {
 	switch r.Kind {
 	case domain.RuleForbid:
@@ -436,8 +483,14 @@ func humanise(r domain.Rule) string {
 	case domain.RuleAllow:
 		switch {
 		case r.NeedsPayment && r.NeedsPermit:
+			if r.RequiredPermitKind != "" {
+				return "Parking allowed with payment or " + permitKindPhrase(r.RequiredPermitKind)
+			}
 			return "Parking allowed with payment or valid permit"
 		case r.NeedsPermit:
+			if r.RequiredPermitKind != "" {
+				return "Parking allowed only for " + permitKindPhrase(r.RequiredPermitKind) + " holders"
+			}
 			return "Parking allowed only for permit holders"
 		case r.NeedsPayment:
 			return "Parking allowed with payment"
@@ -448,4 +501,26 @@ func humanise(r domain.Rule) string {
 		return "Parking allowed with restrictions"
 	}
 	return string(r.Kind)
+}
+
+// permitKindPhrase maps a PermitKind to a noun phrase usable inside
+// "Parking allowed only for X holders" or "with payment or X".
+// Localisation would expand this; for v1, English-only stub.
+func permitKindPhrase(k domain.PermitKind) string {
+	switch k {
+	case domain.PermitDisabled:
+		return "a disabled-parking permit"
+	case domain.PermitResidential:
+		return "a residential permit"
+	case domain.PermitElectric:
+		return "an electric-vehicle permit"
+	case domain.PermitCarpool:
+		return "a carpool permit"
+	case domain.PermitGuest:
+		return "a guest permit"
+	case domain.PermitNyttoA, domain.PermitNyttoB:
+		return "a commercial-use (Nytto) permit"
+	default:
+		return "a valid permit"
+	}
 }

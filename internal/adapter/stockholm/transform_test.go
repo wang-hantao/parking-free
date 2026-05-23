@@ -146,22 +146,23 @@ func TestTransform_PMotorcykel_RealSample(t *testing.T) {
 		t.Fatalf("transform: %v", err)
 	}
 
-	// Sample has 5 features. FID 371 and 372 carry seasonal date-range
-	// fields and should be skipped. Survivors: FID 128, 515, 235.
-	if got := len(batch.RoadSegments); got != 3 {
-		t.Errorf("road segments: want 3 (after skipping 2 seasonal), got %d", got)
+	// Sample has 5 features, all ingested (no more skipping —
+	// seasonal date-range fields now ride on TimeWindow.{Start,End}Month/Day).
+	if got := len(batch.RoadSegments); got != 5 {
+		t.Errorf("road segments: want 5, got %d", got)
 	}
-	if got := batch.SkippedFeatures; got != 2 {
-		t.Errorf("skipped features: want 2 (FID 371 and 372), got %d", got)
+	if got := batch.SkippedFeatures; got != 0 {
+		t.Errorf("skipped features: want 0 (seasonal fields now expressible), got %d", got)
 	}
-	if got := len(batch.Regulations); got != 3 {
-		t.Errorf("regulations: want 3, got %d", got)
+	// Citations 371 and 372 share "0180 2021-04224", so 4 distinct regulations.
+	if got := len(batch.Regulations); got != 4 {
+		t.Errorf("regulations: want 4, got %d", got)
 	}
-	if got := len(batch.Rules); got != 3 {
-		t.Errorf("rules: want 3, got %d", got)
+	if got := len(batch.Rules); got != 5 {
+		t.Errorf("rules: want 5, got %d", got)
 	}
 
-	// Every surviving rule: motorcycle class + payment required.
+	// Every rule: motorcycle class + payment required.
 	for i, r := range batch.Rules {
 		if len(r.VehicleClasses) != 1 || r.VehicleClasses[0] != domain.VehicleMotorcycle {
 			t.Errorf("rule %d: want VehicleClasses=[motorcycle], got %v", i, r.VehicleClasses)
@@ -175,21 +176,41 @@ func TestTransform_PMotorcykel_RealSample(t *testing.T) {
 	}
 }
 
-func TestTransform_PMotorcykel_SkippedFeaturesNotInBatch(t *testing.T) {
-	// The two seasonal FIDs (371, 372) should not produce any rules.
+func TestTransform_PMotorcykel_SeasonalFieldsLandOnTimeWindow(t *testing.T) {
+	// FID 371 in the sample has START_MONTH=6, END_MONTH=8,
+	// START_DAY=15, END_DAY=15 (the summer relaxation window).
+	// FID 372 has the inverse: START_MONTH=8, END_MONTH=6,
+	// START_DAY=16, END_DAY=14 (the rest of the year, cross-year wrap).
 	raw := loadFixture(t, "pmotorcykel_sample.json")
 	batch, _ := Transform(PMotorcykel, raw)
-	for _, r := range batch.Rules {
-		ref := r.AppliesTo[0].TargetID
-		if ref == "pmotorcykel/371/1" || ref == "pmotorcykel/372/1" {
-			t.Errorf("seasonal feature should have been skipped: got rule for %s", ref)
+
+	var summer, nonSummer *domain.TimeWindow
+	for i, r := range batch.Rules {
+		if r.AppliesTo[0].TargetID == "pmotorcykel/371/1" {
+			summer = &batch.Rules[i].TimeWindows[0]
+		}
+		if r.AppliesTo[0].TargetID == "pmotorcykel/372/1" {
+			nonSummer = &batch.Rules[i].TimeWindows[0]
 		}
 	}
-	for _, seg := range batch.RoadSegments {
-		ref := seg.Source.Reference
-		if ref == "pmotorcykel/371/1" || ref == "pmotorcykel/372/1" {
-			t.Errorf("seasonal feature should have been skipped: got segment for %s", ref)
-		}
+	if summer == nil {
+		t.Fatalf("FID 371 (summer window) not found")
+	}
+	if nonSummer == nil {
+		t.Fatalf("FID 372 (non-summer window) not found")
+	}
+
+	// Summer: June 15 – August 15.
+	if summer.StartMonth != 6 || summer.StartDay != 15 ||
+		summer.EndMonth != 8 || summer.EndDay != 15 {
+		t.Errorf("FID 371 seasonal: want 6/15 – 8/15, got %d/%d – %d/%d",
+			summer.StartMonth, summer.StartDay, summer.EndMonth, summer.EndDay)
+	}
+	// Non-summer: Aug 16 – Jun 14 (cross-year wrap, start > end).
+	if nonSummer.StartMonth != 8 || nonSummer.StartDay != 16 ||
+		nonSummer.EndMonth != 6 || nonSummer.EndDay != 14 {
+		t.Errorf("FID 372 seasonal: want 8/16 – 6/14, got %d/%d – %d/%d",
+			nonSummer.StartMonth, nonSummer.StartDay, nonSummer.EndMonth, nonSummer.EndDay)
 	}
 }
 
@@ -264,6 +285,9 @@ func TestTransform_PRorelsehindrad_RealSample(t *testing.T) {
 	for i, r := range batch.Rules {
 		if !r.NeedsPermit {
 			t.Errorf("rule %d: want NeedsPermit=true (disabled placard), got false", i)
+		}
+		if r.RequiredPermitKind != domain.PermitDisabled {
+			t.Errorf("rule %d: want RequiredPermitKind=disabled, got %q", i, r.RequiredPermitKind)
 		}
 		if len(r.VehicleClasses) != 0 {
 			t.Errorf("rule %d: want no vehicle class restriction, got %v", i, r.VehicleClasses)
