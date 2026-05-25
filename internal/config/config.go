@@ -24,6 +24,12 @@ type HTTPConfig struct {
 	Addr         string
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+
+	// AllowedOrigins is a comma-separated list of origins (browser
+	// site origins, e.g. "https://parkingfree.io") permitted to call
+	// the API cross-origin. Empty disables CORS. "*" allows any
+	// origin and is intended only for development.
+	AllowedOrigins []string
 }
 
 type PostgresConfig struct {
@@ -51,9 +57,10 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		HTTP: HTTPConfig{
-			Addr:         envStr("HTTP_ADDR", ":8080"),
-			ReadTimeout:  envDur("HTTP_READ_TIMEOUT", 10*time.Second),
-			WriteTimeout: envDur("HTTP_WRITE_TIMEOUT", 15*time.Second),
+			Addr:           envStr("HTTP_ADDR", ":8080"),
+			ReadTimeout:    envDur("HTTP_READ_TIMEOUT", 10*time.Second),
+			WriteTimeout:   envDur("HTTP_WRITE_TIMEOUT", 15*time.Second),
+			AllowedOrigins: envList("CORS_ALLOWED_ORIGINS"),
 		},
 		Postgres: PostgresConfig{
 			DSN: envStr("PG_DSN", ""),
@@ -91,4 +98,20 @@ func envDur(key string, def time.Duration) time.Duration {
 		fmt.Fprintf(os.Stderr, "config: %s=%q is not a valid duration; using default %s\n", key, v, def)
 	}
 	return def
+}
+
+// envList reads a comma-separated env var, returning trimmed,
+// non-empty values. Returns nil when unset.
+func envList(key string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

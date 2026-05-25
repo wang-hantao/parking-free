@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Keep map containers full-height. Google Maps needs an explicit
+   layout — Tailwind h-full only works if parent has height. */
+html,
+body,
+#root {
+  height: 100%;
+}

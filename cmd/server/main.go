@@ -47,9 +47,10 @@ func main() {
 	ev := engine.New(src, cal)
 
 	srv := httpapi.New(httpapi.Config{
-		Addr:         cfg.HTTP.Addr,
-		ReadTimeout:  cfg.HTTP.ReadTimeout,
-		WriteTimeout: cfg.HTTP.WriteTimeout,
+		Addr:           cfg.HTTP.Addr,
+		ReadTimeout:    cfg.HTTP.ReadTimeout,
+		WriteTimeout:   cfg.HTTP.WriteTimeout,
+		AllowedOrigins: cfg.HTTP.AllowedOrigins,
 	}, logger, ev)
 
 	if err := srv.Run(ctx); err != nil {

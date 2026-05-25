@@ -19,6 +19,14 @@ type Config struct {
 	Addr         string
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+
+	// AllowedOrigins is the list of browser origins permitted to call
+	// the API cross-origin. Empty (the default) disables CORS
+	// entirely, which is correct when the frontend is served from
+	// the same origin or there are no browser clients. Use "*" to
+	// echo every Origin (development only — opens the API to any
+	// site the user visits).
+	AllowedOrigins []string
 }
 
 // Server is the HTTP service.
@@ -36,6 +44,7 @@ func New(cfg Config, logger *slog.Logger, ev *engine.Evaluator) *Server {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(cors(cfg.AllowedOrigins))
 	r.Use(slogRequest(logger))
 
 	r.Get("/healthz", s.handleHealthz)

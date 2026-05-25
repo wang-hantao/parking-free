@@ -43,15 +43,18 @@ internal/
     stockholm/  #   LTF-Tolken HTTP client + transform to domain
   engine/       # rule evaluation kernel + holiday calendar
   store/        # persistence interface + Postgres+PostGIS implementation
-  http/         # HTTP handlers and routing
+  http/         # HTTP handlers, CORS, and routing
 
 migrations/     # Postgres + PostGIS DDL
 docs/           # source-of-truth knowledge base
+
+web/            # React + Vite + TypeScript frontend (its own npm project)
 ```
 
 The dependency direction is `cmd → http → engine → store → domain`,
 with `adapter` bridging external sources into `domain`. `domain` has
-no dependencies on anything else.
+no dependencies on anything else. The frontend in `web/` is an
+independent npm project; the Go toolchain ignores it.
 
 ## Quick start
 
@@ -107,6 +110,29 @@ The `mode` query parameter selects how rules are resolved:
   areas containing the point, plus POI rules within their declared
   offset. Use this for "can I park exactly here right now?". The
   response's `metadata.mode` reports the effective mode.
+
+## Frontend
+
+The `web/` directory is a React + Vite + TypeScript single-page app
+that asks for your location, shows it on a Google Map, calls
+`/allowed`, and renders the verdict with pricing and payment-app
+deep-links. See [`web/README.md`](web/README.md) for setup and
+deployment instructions.
+
+Quick local run, alongside the backend:
+
+```bash
+# Backend with CORS for the dev origin
+export CORS_ALLOWED_ORIGINS=http://localhost:5173
+make docker-up && make migrate && make seed && make run
+
+# In another terminal
+cd web
+cp .env.example .env.local   # then set VITE_GOOGLE_MAPS_API_KEY
+npm install
+npm run dev
+# Open http://localhost:5173
+```
 
 To run actual ingestion against LTF-Tolken:
 
