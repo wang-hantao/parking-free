@@ -77,7 +77,35 @@ export async function fetchVerdict(
       `Verdict request failed: ${res.status} ${res.statusText}`,
     );
   }
-  return body as Verdict;
+  return normalizeVerdict(body);
+}
+
+// normalizeVerdict coerces wire-format quirks at the boundary so
+// components can iterate freely.
+//
+// Go's encoding/json marshals nil slices as `null`, not `[]`. A
+// well-behaved backend initialises required slices to empty (see
+// engine/evaluator.go), but the frontend stays defensive in case the
+// backend drifts or a future code path forgets. Without this, a
+// `verdict.reasons.length` access crashes the page when the server
+// returns `"reasons": null`.
+//
+// We only coerce fields that the TS type declares as a required
+// array. Optional arrays stay undefined; the components already
+// handle that case with `?.` and `??`.
+function normalizeVerdict(body: unknown): Verdict {
+  const v = body as Record<string, unknown>;
+  const out: Verdict = { ...(v as unknown as Verdict) };
+
+  // Required array fields: coalesce null → [].
+  if (out.reasons == null) out.reasons = [];
+
+  // Nested required arrays (only one today: cost-estimate breakdown).
+  if (out.estimated_cost && out.estimated_cost.breakdown == null) {
+    out.estimated_cost = { ...out.estimated_cost, breakdown: [] };
+  }
+
+  return out;
 }
 
 async function safeJson(res: Response): Promise<unknown> {

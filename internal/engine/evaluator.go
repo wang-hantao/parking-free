@@ -173,6 +173,12 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 
 	verdict := domain.Verdict{
 		ExpiresAt: q.At.Add(24 * time.Hour),
+		// Initialize to a non-nil empty slice so encoding/json emits
+		// "reasons": [] rather than "reasons": null when no rules
+		// match. Null trips up consumers that assume the field is
+		// always an array (e.g. the React frontend doing
+		// `verdict.reasons.length`).
+		Reasons: []domain.Reason{},
 	}
 
 	// Two-pass build: first construct all reasons and track which Allow

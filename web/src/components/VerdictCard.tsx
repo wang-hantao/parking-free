@@ -49,7 +49,9 @@ export function VerdictCard({ verdict }: VerdictCardProps) {
         </div>
       )}
 
-      {verdict.reasons.length > 0 && <ReasonsBlock reasons={verdict.reasons} />}
+      {verdict.reasons && verdict.reasons.length > 0 && (
+        <ReasonsBlock reasons={verdict.reasons} />
+      )}
 
       <RawJson verdict={verdict} />
     </div>
