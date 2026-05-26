@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"sort"
 	"time"
 
@@ -185,11 +186,31 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 	// rules are satisfiable by this user; then determine Allowed and
 	// the Blocks flag on each reason from the aggregate state.
 	type stagedReason struct {
-		reason      domain.Reason
-		isForbid    bool
-		isAllow     bool
-		satisfiable bool // for Allow only
-		needsPermit bool // for Allow only — whether this rule contributes the "obtain_permit" need
+		reason       domain.Reason
+		isForbid     bool
+		isAllow      bool
+		satisfiable  bool // for Allow only
+		needsPermit  bool // for Allow only — whether this rule contributes the "obtain_permit" need
+		needsPayment bool // for Allow only — whether this rule contributes "pay_via_app"
+		priority     int  // copied from rule for the priority-bucket logic below
+		superseded   bool // for Allow only — true when a higher-priority Allow exists
+	}
+
+	// First pass: find the maximum priority across applicable Allow
+	// rules. Reserved-class spots (disabled bays, bus stops, motorcycle
+	// bays) carry higher priorities than general paid parking, so when
+	// both overlap at the same physical curb, the reserved one wins —
+	// "this is a disabled bay" is more specific than "this is general
+	// paid parking", and Stockholm enforcement treats it that way.
+	maxAllowPriority := math.MinInt
+	hasAllow := false
+	for _, s := range active {
+		if s.rule.Kind == domain.RuleAllow || s.rule.Kind == domain.RuleRestrict {
+			hasAllow = true
+			if s.rule.Priority > maxAllowPriority {
+				maxAllowPriority = s.rule.Priority
+			}
+		}
 	}
 
 	var staged []*stagedReason
@@ -203,7 +224,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 			Disposition:   s.rule.Kind,
 			HumanReadable: humanise(s.rule),
 		}
-		sr := &stagedReason{reason: r}
+		sr := &stagedReason{reason: r, priority: s.rule.Priority}
 
 		switch s.rule.Kind {
 		case domain.RuleForbid:
@@ -213,17 +234,31 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 			allowExists = true
 			sr.isAllow = true
 			sr.satisfiable = true
+			sr.superseded = hasAllow && s.rule.Priority < maxAllowPriority
+
 			if s.rule.NeedsPermit && !ruleSatisfiedByPermits(s.rule, permits, q.At) {
-				verdict.NeedsAction = appendUnique(verdict.NeedsAction, "obtain_permit")
 				sr.satisfiable = false
 				sr.needsPermit = true
 			}
 			if s.rule.NeedsPayment {
-				verdict.NeedsAction = appendUnique(verdict.NeedsAction, "pay_via_app")
+				sr.needsPayment = true
 				// Payment is always satisfiable: user can choose to pay.
 			}
-			if sr.satisfiable {
-				satisfiableAllow = true
+
+			// Only contribute to verdict-level signals if this rule is
+			// in the winning priority bucket. Superseded rules still
+			// become Reasons (for traceability) but they don't push
+			// NeedsAction or affect Allowed.
+			if !sr.superseded {
+				if sr.needsPermit {
+					verdict.NeedsAction = appendUnique(verdict.NeedsAction, "obtain_permit")
+				}
+				if sr.needsPayment {
+					verdict.NeedsAction = appendUnique(verdict.NeedsAction, "pay_via_app")
+				}
+				if sr.satisfiable {
+					satisfiableAllow = true
+				}
 			}
 		}
 
@@ -239,9 +274,10 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 	// Decide Allowed.
 	//
 	//   - Forbid fires → not allowed (highest precedence).
-	//   - Else: if any Allow exists, allowed only when at least one is
-	//     satisfiable by this user. With no Allows at all, default to
-	//     allowed (nothing forbids).
+	//   - Else: if any Allow exists at the winning priority, allowed
+	//     only when at least one such Allow is satisfiable. Lower-
+	//     priority Allows are "superseded" and don't count.
+	//   - With no Allows at all, default to allowed.
 	switch {
 	case forbidFired:
 		verdict.Allowed = false
@@ -258,10 +294,19 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 			sr.reason.Supports = !verdict.Allowed // supports the not-allowed verdict
 			sr.reason.Blocks = !verdict.Allowed
 		case sr.isAllow:
-			sr.reason.Supports = sr.satisfiable && verdict.Allowed
-			// An unsatisfied Allow blocks only when no satisfiable
-			// alternative exists — otherwise it's just informational.
-			sr.reason.Blocks = !sr.satisfiable && !verdict.Allowed && !forbidFired
+			if sr.superseded {
+				// Superseded by a more specific rule. Surface for
+				// transparency, but the verdict doesn't depend on it.
+				sr.reason.Supports = false
+				sr.reason.Blocks = false
+				sr.reason.Superseded = true
+			} else {
+				sr.reason.Supports = sr.satisfiable && verdict.Allowed
+				// An unsatisfied Allow blocks only when no satisfiable
+				// alternative exists at this priority — otherwise it's
+				// just informational.
+				sr.reason.Blocks = !sr.satisfiable && !verdict.Allowed && !forbidFired
+			}
 		}
 		verdict.Reasons = append(verdict.Reasons, sr.reason)
 	}

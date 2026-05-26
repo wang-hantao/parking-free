@@ -981,3 +981,208 @@ func TestEvaluate_SeasonalWindow_InsideRangeIsActive(t *testing.T) {
 		t.Errorf("in-season Forbid should fire; got allowed=true")
 	}
 }
+
+// =============================================================================
+// Priority-bucket / supersession tests — reserved-class spots overriding
+// general allow rules at the same physical location.
+// =============================================================================
+
+func TestEvaluate_HigherPriorityAllow_SupersedesLowerPriority(t *testing.T) {
+	// Real-world case: user is at a disabled bay carved into a paid
+	// parking strip. The disabled rule (priority 20) and the general
+	// paid-parking rule (priority 5) both apply. The user has no
+	// permits — they can pay for the general spot but not satisfy the
+	// disabled requirement. Verdict: NOT allowed, because the higher
+	// priority rule binds.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "general-paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				Priority:    5,
+				Source:      domain.Source{System: "test", Reference: "ptillaten/X"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "disabled-only", Kind: domain.RuleAllow, NeedsPermit: true,
+				Priority:           20,
+				RequiredPermitKind: domain.PermitDisabled,
+				Source:             domain.Source{System: "test", Reference: "prorelsehindrad/Y"},
+				TimeWindows:        []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "JAT52Y", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if v.Allowed {
+		t.Errorf("higher-priority disabled-only rule should bind; got allowed=true")
+	}
+	if !contains(v.NeedsAction, "obtain_permit") {
+		t.Errorf("expected obtain_permit in needs_action; got %v", v.NeedsAction)
+	}
+	if contains(v.NeedsAction, "pay_via_app") {
+		t.Errorf("pay_via_app should NOT appear (general-paid is superseded); got %v", v.NeedsAction)
+	}
+}
+
+func TestEvaluate_HigherPriorityAllow_BothReasonsListed(t *testing.T) {
+	// Same setup as above — verify Reasons array contains both rules
+	// for traceability, with the superseded one flagged.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "general", Kind: domain.RuleAllow, NeedsPayment: true,
+				Priority: 5, Source: domain.Source{System: "test", Reference: "A"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "disabled", Kind: domain.RuleAllow, NeedsPermit: true,
+				RequiredPermitKind: domain.PermitDisabled,
+				Priority:           20,
+				Source:             domain.Source{System: "test", Reference: "B"},
+				TimeWindows:        []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      now,
+	})
+
+	if len(v.Reasons) != 2 {
+		t.Fatalf("expected 2 reasons (both rules for transparency), got %d", len(v.Reasons))
+	}
+
+	var supersededCount, blockingCount int
+	for _, r := range v.Reasons {
+		if r.Superseded {
+			supersededCount++
+			if r.Source.Reference != "A" {
+				t.Errorf("wrong rule marked superseded: %s (want A)", r.Source.Reference)
+			}
+		}
+		if r.Blocks {
+			blockingCount++
+			if r.Source.Reference != "B" {
+				t.Errorf("wrong rule marked blocking: %s (want B)", r.Source.Reference)
+			}
+		}
+	}
+	if supersededCount != 1 {
+		t.Errorf("want exactly 1 superseded reason, got %d", supersededCount)
+	}
+	if blockingCount != 1 {
+		t.Errorf("want exactly 1 blocking reason, got %d", blockingCount)
+	}
+}
+
+func TestEvaluate_HigherPriorityAllow_UserSatisfiesIt(t *testing.T) {
+	// Same disabled bay, but user HAS a disabled permit. The higher-
+	// priority rule is satisfied. Verdict: allowed.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "general", Kind: domain.RuleAllow, NeedsPayment: true,
+				Priority:    5,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "disabled", Kind: domain.RuleAllow, NeedsPermit: true,
+				RequiredPermitKind: domain.PermitDisabled,
+				Priority:           20,
+				TimeWindows:        []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		permits: map[string][]domain.Permit{
+			"ABC123": {{
+				Kind: domain.PermitDisabled, Plate: "ABC123",
+				ValidFrom: now.Add(-24 * time.Hour),
+				ValidTo:   now.Add(24 * time.Hour),
+			}},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if !v.Allowed {
+		t.Errorf("disabled permit holder should be allowed; got %s", v.Summary)
+	}
+	if contains(v.NeedsAction, "pay_via_app") {
+		t.Errorf("pay_via_app should NOT appear when disabled rule supersedes general paid; got %v", v.NeedsAction)
+	}
+}
+
+func TestEvaluate_SamePriorityAllows_StillAlternatives(t *testing.T) {
+	// Two Allow rules at the same priority — peers, not superseded.
+	// If either is satisfied, allowed. This is the original engine
+	// semantics, preserved when priorities tie.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "pay", Kind: domain.RuleAllow, NeedsPayment: true,
+				Priority:    5,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "permit-residential", Kind: domain.RuleAllow, NeedsPermit: true,
+				RequiredPermitKind: domain.PermitResidential,
+				Priority:           5,
+				TimeWindows:        []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if !v.Allowed {
+		t.Errorf("equal-priority peers: either-satisfied → allowed; got %s", v.Summary)
+	}
+}
+
+func TestEvaluate_ForbidWinsOverEverything(t *testing.T) {
+	// Even if a high-priority reserved-class Allow is satisfied, an
+	// applicable Forbid (e.g. servicedagar street cleaning) blocks.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "cleaning", Kind: domain.RuleForbid,
+				Priority:    10, // servicedagar
+				Source:      domain.Source{System: "test", Reference: "servicedagar/X"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "disabled", Kind: domain.RuleAllow, NeedsPermit: true,
+				RequiredPermitKind: domain.PermitDisabled,
+				Priority:           20,
+				TimeWindows:        []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		permits: map[string][]domain.Permit{
+			"ABC": {{
+				Kind: domain.PermitDisabled, Plate: "ABC",
+				ValidFrom: now.Add(-24 * time.Hour),
+				ValidTo:   now.Add(24 * time.Hour),
+			}},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if v.Allowed {
+		t.Errorf("Forbid should bind even when a higher-priority Allow is satisfied")
+	}
+}

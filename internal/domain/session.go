@@ -63,6 +63,13 @@ type Reason struct {
 	HumanReadable string   `json:"human_readable"`
 	Supports      bool     `json:"supports"`
 	Blocks        bool     `json:"blocks,omitempty"`
+
+	// Superseded is set when this Allow rule is overridden by a
+	// more-specific Allow rule at the same location (e.g. a disabled
+	// bay carving into a general paid-parking strip). Superseded
+	// rules are included in the Reasons array for traceability but
+	// don't contribute to the Allowed decision or NeedsAction.
+	Superseded bool `json:"superseded,omitempty"`
 }
 
 // FineEvent is recorded when a parking fine is issued for or against a

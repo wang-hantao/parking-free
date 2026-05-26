@@ -169,10 +169,21 @@ function ReasonsBlock({ reasons }: { reasons: Verdict["reasons"] }) {
           <li
             key={r.rule_id}
             className={`rounded border px-3 py-2 ${
-              r.blocks ? "border-forbidden-500 bg-forbidden-50" : "border-slate-200 bg-slate-50"
+              r.blocks
+                ? "border-forbidden-500 bg-forbidden-50"
+                : r.superseded
+                ? "border-slate-200 bg-slate-50 opacity-60"
+                : "border-slate-200 bg-slate-50"
             }`}
           >
-            <p className="text-slate-700">{r.human_readable}</p>
+            <p className="text-slate-700">
+              {r.human_readable}
+              {r.superseded && (
+                <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-600">
+                  superseded
+                </span>
+              )}
+            </p>
             <p className="mt-1 text-xs text-slate-500">
               {r.source.system} / {r.source.reference}
             </p>

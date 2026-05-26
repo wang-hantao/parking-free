@@ -266,10 +266,20 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 		tw := buildTimeWindow(weekday, startHHMM, endHHMM)
 		applySeasonalRange(&tw, props)
 
+		// Priority: 5 by default (general paid parking). Bumped to
+		// 20 when this ptillaten feature carries a permit requirement
+		// (e.g. rörelsehindrad-flagged ptillaten = a disabled-permit
+		// holder spot inside the broader paid-parking strip). At 20
+		// it supersedes a co-located general allow.
+		priority := 5
+		if needsPermit {
+			priority = 20
+		}
+
 		batch.Rules = append(batch.Rules, domain.Rule{
 			RegulationID:       citation, // placeholder
 			Kind:               domain.RuleAllow,
-			Priority:           5, // lower than servicedagar (10), so cleaning wins on overlap
+			Priority:           priority,
 			NeedsPayment:       needsPayment,
 			NeedsPermit:        needsPermit,
 			RequiredPermitKind: permitKind,
@@ -401,9 +411,18 @@ func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *Ingest
 		applySeasonalRange(&tw, props)
 
 		batch.Rules = append(batch.Rules, domain.Rule{
-			RegulationID:       citation, // placeholder
-			Kind:               domain.RuleAllow,
-			Priority:           5,
+			RegulationID: citation, // placeholder
+			Kind:         domain.RuleAllow,
+			// Priority 20: reserved-class spots (disabled bays, bus
+			// stops, truck-only bays, motorcycle bays) supersede
+			// general paid parking (priority 5) at the same location.
+			// They tie at 20 amongst themselves; that's intentional —
+			// the engine treats peers as alternatives within the same
+			// bucket (e.g. a spot that's both motorcycle AND disabled
+			// would be either-or). They lose to Forbid (servicedagar
+			// cleaning at priority 10 is a Forbid, but Forbid wins
+			// regardless of priority).
+			Priority:           20,
 			VehicleClasses:     classes,
 			NeedsPayment:       needsPayment,
 			NeedsPermit:        cfg.needsPermit,

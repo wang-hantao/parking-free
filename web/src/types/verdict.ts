@@ -42,6 +42,11 @@ export interface Reason {
   human_readable: string;
   supports: boolean;
   blocks?: boolean;
+  // Set when a more-specific Allow rule at the same location
+  // overrides this one (e.g. a disabled bay carving into a general
+  // paid-parking strip). Surface in UI as informational context, not
+  // as a binding rule.
+  superseded?: boolean;
 }
 
 export interface ZoneRef {

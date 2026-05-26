@@ -113,6 +113,22 @@ The `mode` query parameter selects how rules are resolved:
   offset. Use this for "can I park exactly here right now?". The
   response's `metadata.mode` reports the effective mode.
 
+When multiple Allow rules apply at the same location (common in
+strict mode where ptillaten + servicedagar + a reserved-class spot
+all overlap on the same curb), the engine resolves by priority:
+
+- Reserved-class spots (disabled bays, bus stops, motorcycle bays):
+  **priority 20** — supersede general allows at the same location
+- Street cleaning (servicedagar): priority 10, but it's a Forbid, so
+  it wins regardless of priority
+- General paid parking (ptillaten): priority 5
+
+So at a disabled bay carved out of a paid-parking strip, the
+disabled-only requirement binds: a car without a disabled permit
+gets `allowed: false` even though the general ptillaten rule would
+otherwise allow payment. The lower-priority rule appears in
+`reasons` with `superseded: true` for traceability.
+
 ## Frontend
 
 The `web/` directory is a React + Vite + TypeScript single-page app
