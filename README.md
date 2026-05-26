@@ -105,8 +105,10 @@ The `mode` query parameter selects how rules are resolved:
 
 - `mode=nearby` (default): rules within `radius` metres (50m default).
   Returns wider context — useful for "what's around here" views.
-- `mode=strict`: rules that legally apply to the exact point — the
-  single nearest road segment within 10m, plus zones and parking
+- `mode=strict`: rules that legally apply to the exact point — every
+  road-segment rule within 5m of the query point (naturally captures
+  the multiple overlapping föreskrifter on the same curb without
+  bleeding across a normal-width street), plus zones and parking
   areas containing the point, plus POI rules within their declared
   offset. Use this for "can I park exactly here right now?". The
   response's `metadata.mode` reports the effective mode.

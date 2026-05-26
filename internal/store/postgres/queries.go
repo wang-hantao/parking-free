@@ -76,29 +76,29 @@ WHERE a.target_kind = 'road_segment'
     $3 + GREATEST(ABS(a.offset_from_meters), ABS(a.offset_to_meters))
   )`
 
-// sqlRulesByNearestSegment supports strict mode: collapse the
-// road-segment match to the SINGLE nearest segment within $3 metres,
-// then return all rules attached to it. Without this collapse, a
-// strict query with the existing radius-based SQL would either match
-// many parallel segments (radius too generous) or nothing (radius
-// too tight on a line geometry).
+// sqlRulesByRoadSegmentStrict implements strict mode for road-segment
+// rules: identical to sqlRulesByRoadSegment but called with a much
+// tighter radius (~5 m) so "this exact spot" is what's returned.
 //
-// $3 is the tolerance: how far the query point may be from the curb
-// before we consider "no segment near here". 10m is a reasonable
-// default — covers GPS noise and curb offset without crossing the
-// street.
-const sqlRulesByNearestSegment = `
-WITH nearest AS (
-    SELECT rs.id
-    FROM road_segment rs
-    WHERE ST_DWithin(
-        rs.geom::geography,
-        ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
-        $3
-    )
-    ORDER BY rs.geom::geography <-> ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
-    LIMIT 1
-)
+// History: an earlier version of strict mode used a CTE that picked
+// the single geometrically nearest road_segment via "ORDER BY <-> LIMIT 1"
+// and then joined rules to it. That had two problems:
+//
+//  1. The CTE didn't filter to segments with rules. If a ghost
+//     segment (no rule_applies_to entry, or one whose regulation
+//     has effective_to in the past) was geometrically closer than
+//     the real rule's segment, the JOIN produced zero rows and the
+//     verdict came back empty.
+//
+//  2. It returned rules from only ONE segment. Stockholm spots
+//     typically have multiple overlapping föreskrifter (ptillaten +
+//     servicedagar + sometimes prorelsehindrad) — strict mode
+//     should return all of them, not pick one.
+//
+// This radius-based query joins through rule_applies_to first, so
+// ghost segments are filtered out for free, and it returns every
+// rule whose segment is within $3 metres of the query point.
+const sqlRulesByRoadSegmentStrict = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
        reg.source_system, COALESCE(reg.source_reference, ''),
@@ -107,9 +107,14 @@ SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
 FROM rule r
 JOIN rule_applies_to a ON a.rule_id = r.id
 JOIN regulation reg ON reg.id = r.regulation_id
-JOIN nearest n ON n.id = a.target_id
+JOIN road_segment rs ON rs.id = a.target_id
 WHERE a.target_kind = 'road_segment'
-  AND (reg.effective_to IS NULL OR reg.effective_to > NOW())`
+  AND (reg.effective_to IS NULL OR reg.effective_to > NOW())
+  AND ST_DWithin(
+    rs.geom::geography,
+    ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+    $3 + GREATEST(ABS(a.offset_from_meters), ABS(a.offset_to_meters))
+  )`
 
 const sqlRulesByPOI = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,

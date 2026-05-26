@@ -106,18 +106,24 @@ func (s *Store) RulesNearby(ctx context.Context, pos domain.Coordinate, radiusM 
 	return rules, nil
 }
 
-// nearestSegmentToleranceM is the max distance from a query point to
-// the nearest road segment that strict-mode resolution will accept.
-// Stockholm LTF geometries trace the curb; queries on the parking
-// strip are typically 2-4m off. 10m comfortably covers GPS noise
-// without crossing the street.
-const nearestSegmentToleranceM = 10.0
+// strictSegmentRadiusM is the radius around the query point used by
+// strict-mode road-segment resolution. Returns rules from all
+// segments within this distance — naturally captures the multiple
+// overlapping föreskrifter that sit on the same physical curb in
+// Stockholm (ptillaten + servicedagar + sometimes prorelsehindrad)
+// without bleeding across to the opposite curb on a normal street
+// (~14 m wide).
+//
+// Trade-off: on very narrow streets (Gamla Stan alleys, ~4-5 m wide)
+// this can pick up rules from both curbs. Acceptable for v1 — those
+// streets rarely have parking anyway. If it becomes a problem, swap
+// in directional matching using rs.direction + the user's heading.
+const strictSegmentRadiusM = 5.0
 
 // RulesAt is the strict-mode counterpart to RulesNearby. It returns
 // only rules that legally apply to the exact position:
-//   - road_segment: the single nearest segment within
-//     nearestSegmentToleranceM metres (instead of all segments in a
-//     wider radius)
+//   - road_segment: all segments within strictSegmentRadiusM metres
+//     (≈ "this exact spot", typically 5 m)
 //   - zone: ST_Contains (point inside the polygon)
 //   - parking_area: ST_Contains
 //   - POI: rules within their declared offset extent (no extra
@@ -127,10 +133,10 @@ const nearestSegmentToleranceM = 10.0
 // the client requested Mode=strict.
 func (s *Store) RulesAt(ctx context.Context, pos domain.Coordinate) ([]domain.Rule, error) {
 	// All four queries take ($1=lng, $2=lat, $3=radius). For the
-	// nearest-segment query, $3 is the tolerance. For the others,
-	// $3=0 leaves only the per-rule offset extent contributing to
-	// distance — i.e. true containment for polygons, offset-only for
-	// POIs.
+	// road-segment query, $3 is the strict tolerance. For the
+	// others, $3=0 leaves only the per-rule offset extent
+	// contributing to distance — i.e. true containment for polygons,
+	// offset-only for POIs.
 	type fetch struct {
 		sql    string
 		radius float64
@@ -138,7 +144,7 @@ func (s *Store) RulesAt(ctx context.Context, pos domain.Coordinate) ([]domain.Ru
 	fetches := []fetch{
 		{sqlRulesByZone, 0},
 		{sqlRulesByParkingArea, 0},
-		{sqlRulesByNearestSegment, nearestSegmentToleranceM},
+		{sqlRulesByRoadSegmentStrict, strictSegmentRadiusM},
 		{sqlRulesByPOI, 0},
 	}
 
