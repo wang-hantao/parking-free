@@ -398,3 +398,121 @@ func TestOperatorsForZone(t *testing.T) {
 		t.Errorf("second operator has no template; deeplink should be empty, got %q", got[1].Deeplink)
 	}
 }
+
+func TestPruneOrphanRoadSegments(t *testing.T) {
+	st, ctx := openTestStore(t)
+
+	// Insert 3 segments under prefix "ptillaten/":
+	//   - 18819/4946: will have a rule attached → must survive
+	//   - 290/1:      no rule → orphan, should be deleted
+	//   - 18452/1:    no rule → orphan, should be deleted
+	// Plus one outside the prefix:
+	//   - servicedagar/107/1: no rule, but different prefix → must survive
+	// Plus one with rules outside the prefix:
+	//   - prorelsehindrad/1875/9204: has a rule → must survive
+	//
+	// Mirrors the real-world data state the user observed at
+	// Sankt Eriksgatan after multiple LTF ingestion runs.
+
+	type segSpec struct {
+		ref     string
+		hasRule bool
+	}
+	specs := []segSpec{
+		{"ptillaten/18819/4946", true},
+		{"ptillaten/290/1", false},
+		{"ptillaten/18452/1", false},
+		{"servicedagar/107/1", false},
+		{"prorelsehindrad/1875/9204", true},
+	}
+
+	segIDs := make(map[string]string, len(specs))
+	for _, sp := range specs {
+		const q = `
+			INSERT INTO road_segment (street_name, municipality, source_system, source_reference, geom)
+			VALUES ('Sankt Eriksgatan', 'Stockholm', 'stockholm.ltf-tolken', $1,
+				ST_GeomFromText('LINESTRING(18.032 59.345, 18.033 59.345)', 4326))
+			RETURNING id::text`
+		var id string
+		if err := st.pool.QueryRow(ctx, q, sp.ref).Scan(&id); err != nil {
+			t.Fatalf("insert seg %s: %v", sp.ref, err)
+		}
+		segIDs[sp.ref] = id
+	}
+
+	// Attach a rule to the ones marked hasRule. Each needs a
+	// regulation too; share one for simplicity.
+	const regQ = `
+		INSERT INTO regulation (id, source_system, source_reference, decision_authority, language, effective_from)
+		VALUES (gen_random_uuid(), 'stockholm.ltf-tolken', 'test-citation', 'Stockholms stad', 'sv-SE', NOW())
+		RETURNING id::text`
+	var regID string
+	if err := st.pool.QueryRow(ctx, regQ).Scan(&regID); err != nil {
+		t.Fatalf("insert regulation: %v", err)
+	}
+
+	for _, sp := range specs {
+		if !sp.hasRule {
+			continue
+		}
+		const ruleQ = `
+			WITH r AS (
+				INSERT INTO rule (id, regulation_id, kind, max_duration_s, needs_payment, needs_permit, vehicle_classes, priority)
+				VALUES (gen_random_uuid(), $1::uuid, 'allow', 0, false, false, '{}', 5)
+				RETURNING id
+			)
+			INSERT INTO rule_applies_to (rule_id, target_kind, target_id, offset_from_meters, offset_to_meters)
+			SELECT id, 'road_segment', $2::uuid, 0, 0 FROM r`
+		if _, err := st.pool.Exec(ctx, ruleQ, regID, segIDs[sp.ref]); err != nil {
+			t.Fatalf("attach rule to %s: %v", sp.ref, err)
+		}
+	}
+
+	// Prune ptillaten orphans. Should delete 2 rows.
+	deleted, err := st.PruneOrphanRoadSegments(ctx, "stockholm.ltf-tolken", "ptillaten/")
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("want 2 ptillaten orphans deleted, got %d", deleted)
+	}
+
+	// Verify what's left.
+	type remaining struct{ ref string }
+	rows, err := st.pool.Query(ctx, `
+		SELECT source_reference FROM road_segment
+		WHERE source_system = 'stockholm.ltf-tolken' ORDER BY source_reference`)
+	if err != nil {
+		t.Fatalf("query remaining: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var ref string
+		_ = rows.Scan(&ref)
+		got = append(got, ref)
+	}
+
+	want := []string{
+		"prorelsehindrad/1875/9204", // has rule, different prefix — survives
+		"ptillaten/18819/4946",      // has rule — survives
+		"servicedagar/107/1",        // no rule but different prefix — survives
+	}
+	if len(got) != len(want) {
+		t.Fatalf("want %d remaining, got %d: %v", len(want), len(got), got)
+	}
+	for i, ref := range want {
+		if got[i] != ref {
+			t.Errorf("remaining[%d]: got %q, want %q", i, got[i], ref)
+		}
+	}
+
+	// Idempotency: running prune again should delete 0.
+	deleted, err = st.PruneOrphanRoadSegments(ctx, "stockholm.ltf-tolken", "ptillaten/")
+	if err != nil {
+		t.Fatalf("prune (second call): %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("second prune should be a no-op; got %d deleted", deleted)
+	}
+}

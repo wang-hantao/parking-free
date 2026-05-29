@@ -155,10 +155,26 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 	dayType := e.cal.DayType(q.At)
 	tod := minutesOfDay(q.At)
 
-	// Filter to active, vehicle-relevant rules.
+	// Filter to active, time-relevant rules.
+	//
+	// Vehicle-class handling differs by Kind:
+	//
+	//   - Forbid with VehicleClasses: only applies to those classes.
+	//     Drop for non-matching vehicles (the Forbid genuinely doesn't
+	//     fire — e.g. "no trucks 9-17" doesn't apply to a car).
+	//
+	//   - Allow with VehicleClasses: the rule RESERVES the spot for
+	//     those classes. We keep it in `active` regardless of the
+	//     user's class — the staged-reason loop below interprets a
+	//     class mismatch as a binding block on this user. A car at a
+	//     bus stop cannot park, even though the bus stop's Allow rule
+	//     doesn't technically "apply" to cars. Without this, dropping
+	//     the rule here would leave only co-located general rules
+	//     (e.g. ptillaten) visible and incorrectly produce
+	//     "allowed: true" for a car parked in a bus bay.
 	var active []scoredRule
 	for _, r := range nearby {
-		if !r.MatchesVehicle(q.Vehicle) {
+		if r.Kind == domain.RuleForbid && !r.MatchesVehicle(q.Vehicle) {
 			continue
 		}
 		matched := matchingWindows(r.TimeWindows, q.At, dayType, tod)
@@ -186,14 +202,15 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 	// rules are satisfiable by this user; then determine Allowed and
 	// the Blocks flag on each reason from the aggregate state.
 	type stagedReason struct {
-		reason       domain.Reason
-		isForbid     bool
-		isAllow      bool
-		satisfiable  bool // for Allow only
-		needsPermit  bool // for Allow only — whether this rule contributes the "obtain_permit" need
-		needsPayment bool // for Allow only — whether this rule contributes "pay_via_app"
-		priority     int  // copied from rule for the priority-bucket logic below
-		superseded   bool // for Allow only — true when a higher-priority Allow exists
+		reason        domain.Reason
+		isForbid      bool
+		isAllow       bool
+		satisfiable   bool // for Allow only
+		needsPermit   bool // for Allow only — whether this rule contributes the "obtain_permit" need
+		needsPayment  bool // for Allow only — whether this rule contributes "pay_via_app"
+		priority      int  // copied from rule for the priority-bucket logic below
+		superseded    bool // for Allow only — true when a higher-priority Allow exists
+		classMismatch bool // for Allow only — rule reserves the spot for vehicle classes the user isn't in
 	}
 
 	// First pass: find the maximum priority across applicable Allow
@@ -236,6 +253,18 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 			sr.satisfiable = true
 			sr.superseded = hasAllow && s.rule.Priority < maxAllowPriority
 
+			// Vehicle-class reservation: when this Allow rule lists
+			// vehicle classes and the user's class isn't among them,
+			// the spot is reserved for those classes — the user is
+			// blocked. Distinct from NeedsPermit because no action
+			// (paying, getting a permit) can fix a car parked at a
+			// bus stop.
+			if len(s.rule.VehicleClasses) > 0 && !s.rule.MatchesVehicle(q.Vehicle) {
+				sr.satisfiable = false
+				sr.classMismatch = true
+				sr.reason.HumanReadable = humaniseClassReservation(s.rule.VehicleClasses)
+			}
+
 			if s.rule.NeedsPermit && !ruleSatisfiedByPermits(s.rule, permits, q.At) {
 				sr.satisfiable = false
 				sr.needsPermit = true
@@ -250,11 +279,15 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 			// become Reasons (for traceability) but they don't push
 			// NeedsAction or affect Allowed.
 			if !sr.superseded {
-				if sr.needsPermit {
-					verdict.NeedsAction = appendUnique(verdict.NeedsAction, "obtain_permit")
-				}
-				if sr.needsPayment {
-					verdict.NeedsAction = appendUnique(verdict.NeedsAction, "pay_via_app")
+				// Class mismatch suppresses pay/permit suggestions —
+				// no action will help a car at a bus stop.
+				if !sr.classMismatch {
+					if sr.needsPermit {
+						verdict.NeedsAction = appendUnique(verdict.NeedsAction, "obtain_permit")
+					}
+					if sr.needsPayment {
+						verdict.NeedsAction = appendUnique(verdict.NeedsAction, "pay_via_app")
+					}
 				}
 				if sr.satisfiable {
 					satisfiableAllow = true
@@ -573,5 +606,54 @@ func permitKindPhrase(k domain.PermitKind) string {
 		return "a commercial-use (Nytto) permit"
 	default:
 		return "a valid permit"
+	}
+}
+
+// humaniseClassReservation produces a "reserved for X" message used
+// when a class-restricted Allow rule blocks a non-matching vehicle.
+// Lists each class with a localised noun phrase; falls back to the
+// raw enum value if a class isn't recognised (forward-compatible
+// for future additions).
+func humaniseClassReservation(classes []domain.VehicleClass) string {
+	if len(classes) == 0 {
+		return "Parking reserved"
+	}
+	phrases := make([]string, 0, len(classes))
+	for _, c := range classes {
+		phrases = append(phrases, vehicleClassPhrase(c))
+	}
+	switch len(phrases) {
+	case 1:
+		return "Parking reserved for " + phrases[0]
+	case 2:
+		return "Parking reserved for " + phrases[0] + " and " + phrases[1]
+	default:
+		joined := ""
+		for i, p := range phrases {
+			switch {
+			case i == 0:
+				joined = p
+			case i == len(phrases)-1:
+				joined += ", and " + p
+			default:
+				joined += ", " + p
+			}
+		}
+		return "Parking reserved for " + joined
+	}
+}
+
+func vehicleClassPhrase(c domain.VehicleClass) string {
+	switch c {
+	case domain.VehicleCar:
+		return "cars"
+	case domain.VehicleBus:
+		return "buses"
+	case domain.VehicleTruck:
+		return "trucks"
+	case domain.VehicleMotorcycle:
+		return "motorcycles"
+	default:
+		return string(c)
 	}
 }

@@ -129,6 +129,38 @@ gets `allowed: false` even though the general ptillaten rule would
 otherwise allow payment. The lower-priority rule appears in
 `reasons` with `superseded: true` for traceability.
 
+### Vehicle-class reservations
+
+Reserved-class spots (pbuss, plastbil, pmotorcykel) carry
+`VehicleClasses` on their Allow rules. Semantics are asymmetric by
+rule kind:
+
+- **Allow with VehicleClasses**: the spot is **reserved** for those
+  classes. Non-matching vehicles are blocked. A car at a bus stop
+  gets `allowed: false` with a reason `"Parking reserved for buses"`
+  — even though the bus-stop rule technically "doesn't apply" to
+  cars in the classical sense.
+- **Forbid with VehicleClasses**: a class-specific restriction.
+  Doesn't fire for non-matching vehicles. Hypothetical "no trucks
+  9-17" leaves cars unaffected.
+
+This asymmetry matches Stockholm enforcement: a bus stop blocks
+non-buses, while a class-specific Forbid only blocks the named
+classes.
+
+### Ingester idempotency
+
+`UpsertRules` is destructive per regulation: each ingest run deletes
+existing rules and re-inserts the current snapshot. `UpsertRoadSegments`
+is purely additive, so segments from features that Stockholm removes
+between LTF revisions would otherwise linger as orphans.
+
+After each föreskrift's run, the ingester calls
+`PruneOrphanRoadSegments` to delete segments under that föreskrift's
+prefix that have no `rule_applies_to` entries. The count is logged
+as `segments_pruned`. Net effect: re-ingestion is idempotent — DB
+state matches whatever Stockholm's LTF currently exposes.
+
 ## Frontend
 
 The `web/` directory is a React + Vite + TypeScript single-page app

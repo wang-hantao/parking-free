@@ -1186,3 +1186,154 @@ func TestEvaluate_ForbidWinsOverEverything(t *testing.T) {
 		t.Errorf("Forbid should bind even when a higher-priority Allow is satisfied")
 	}
 }
+
+// =============================================================================
+// Vehicle-class reservation tests — class-restricted Allow rules block
+// non-matching vehicles rather than being silently filtered out.
+// =============================================================================
+
+func TestEvaluate_ClassReservedSpot_BlocksOtherVehicle(t *testing.T) {
+	// Bus stop: Allow with VehicleClasses=[bus]. A car queries.
+	// Without the fix, this rule would be filtered out at the active
+	// stage and the verdict would default to allowed=true. With the
+	// fix, the rule stays in active and blocks the car.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "bus-stop", Kind: domain.RuleAllow,
+				VehicleClasses: []domain.VehicleClass{domain.VehicleBus},
+				Priority:       20,
+				Source:         domain.Source{System: "test", Reference: "pbuss/X"},
+				TimeWindows:    []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if v.Allowed {
+		t.Errorf("car at bus-only spot should be blocked; got allowed=true")
+	}
+	if len(v.Reasons) != 1 {
+		t.Fatalf("expected 1 reason; got %d", len(v.Reasons))
+	}
+	if !v.Reasons[0].Blocks {
+		t.Errorf("the bus-only rule should mark Blocks=true for the car")
+	}
+	if contains(v.NeedsAction, "pay_via_app") || contains(v.NeedsAction, "obtain_permit") {
+		t.Errorf("class mismatch shouldn't suggest pay or permit; got %v", v.NeedsAction)
+	}
+}
+
+func TestEvaluate_ClassReservedSpot_AllowsMatchingVehicle(t *testing.T) {
+	// Same bus-only rule. A bus queries → allowed.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "bus-stop", Kind: domain.RuleAllow,
+				VehicleClasses: []domain.VehicleClass{domain.VehicleBus},
+				Priority:       20,
+				TimeWindows:    []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "BUS1", Class: domain.VehicleBus},
+		At:      now,
+	})
+	if !v.Allowed {
+		t.Errorf("bus at bus-only spot should be allowed; got %s", v.Summary)
+	}
+}
+
+func TestEvaluate_ClassReservedInGeneralStrip_BlocksCarEvenWithPaidNearby(t *testing.T) {
+	// The case the user actually hit: bus stop (Priority 20) carved
+	// into a general paid-parking strip (Priority 5). A car queries.
+	// The general allow is superseded; the bus-only rule blocks the
+	// car. Net result: not allowed.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "general", Kind: domain.RuleAllow, NeedsPayment: true,
+				Priority: 5, Source: domain.Source{System: "test", Reference: "ptillaten/X"},
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "bus-stop", Kind: domain.RuleAllow,
+				VehicleClasses: []domain.VehicleClass{domain.VehicleBus},
+				Priority:       20,
+				Source:         domain.Source{System: "test", Reference: "pbuss/Y"},
+				TimeWindows:    []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "JAT52Y", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if v.Allowed {
+		t.Errorf("car at bus-stop-in-paid-strip should be blocked")
+	}
+	if contains(v.NeedsAction, "pay_via_app") {
+		t.Errorf("shouldn't suggest paying for a bus stop; got %v", v.NeedsAction)
+	}
+}
+
+func TestEvaluate_ClassRestrictedForbid_DoesNotFireForOtherClass(t *testing.T) {
+	// Asymmetry check: a Forbid with VehicleClasses=[truck] (e.g.
+	// "no trucks 9-17") doesn't apply to a car. Car at this spot
+	// during the forbidden window is unaffected.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "no-trucks", Kind: domain.RuleForbid,
+				VehicleClasses: []domain.VehicleClass{domain.VehicleTruck},
+				Priority:       10,
+				Source:         domain.Source{System: "test", Reference: "no-trucks/X"},
+				TimeWindows:    []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 540, EndMin: 1020}}, // 9-17
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if !v.Allowed {
+		t.Errorf("Forbid for trucks shouldn't fire for a car; got allowed=false")
+	}
+	if len(v.Reasons) != 0 {
+		t.Errorf("Forbid for other class shouldn't show as a Reason; got %d", len(v.Reasons))
+	}
+}
+
+func TestEvaluate_HumaniseClassReservation(t *testing.T) {
+	// Snapshot the user-facing strings so refactors don't accidentally
+	// drop the localised noun phrases.
+	cases := []struct {
+		classes []domain.VehicleClass
+		want    string
+	}{
+		{[]domain.VehicleClass{domain.VehicleBus}, "Parking reserved for buses"},
+		{[]domain.VehicleClass{domain.VehicleCar, domain.VehicleTruck}, "Parking reserved for cars and trucks"},
+		{
+			[]domain.VehicleClass{domain.VehicleBus, domain.VehicleTruck, domain.VehicleMotorcycle},
+			"Parking reserved for buses, trucks, and motorcycles",
+		},
+		{[]domain.VehicleClass{}, "Parking reserved"},
+	}
+	for _, c := range cases {
+		got := humaniseClassReservation(c.classes)
+		if got != c.want {
+			t.Errorf("classes=%v: got %q, want %q", c.classes, got, c.want)
+		}
+	}
+}

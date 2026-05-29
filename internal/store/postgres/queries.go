@@ -260,3 +260,30 @@ ON CONFLICT (id) DO UPDATE SET
   valid_from = EXCLUDED.valid_from,
   valid_to = EXCLUDED.valid_to,
   updated_at = NOW()`
+
+// sqlPruneOrphanRoadSegments deletes road_segment rows whose
+// source_reference is scoped to a given prefix (e.g. "ptillaten/")
+// AND have no rule_applies_to entries pointing at them.
+//
+// Used by the ingester after each föreskrift's run to keep the table
+// idempotent across LTF data revisions. When Stockholm renumbers a
+// FID or removes a feature between snapshots, the old segment row
+// would otherwise linger forever — bloating spatial indexes and
+// confusing diagnostic queries — because UpsertRoadSegments is
+// purely additive.
+//
+// Safe because: by the time this runs, UpsertRules has already
+// reconciled rules to the current batch. Any segment with no
+// rule_applies_to entry is, by definition, no longer in this
+// föreskrift's snapshot.
+//
+// Returns the count of deleted rows so the ingester can log it.
+const sqlPruneOrphanRoadSegments = `
+DELETE FROM road_segment rs
+WHERE rs.source_system = $1
+  AND rs.source_reference LIKE $2
+  AND NOT EXISTS (
+    SELECT 1 FROM rule_applies_to a
+    WHERE a.target_id = rs.id
+      AND a.target_kind = 'road_segment'
+  )`

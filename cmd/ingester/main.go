@@ -173,6 +173,18 @@ func runIngest(logger *slog.Logger, cfg config.Config, args []string) {
 			continue
 		}
 
+		// Drop stale segments under this föreskrift's prefix. Without
+		// this, every LTF revision that renumbers or removes a
+		// feature leaves the old segment behind as an orphan. The
+		// prefix matches the segRef format that the transforms use:
+		// "<foreskrift>/<FID>/<extentNo>". Foreskrift values are
+		// already the prefix string, so we just append "/".
+		pruned, err := store.PruneOrphanRoadSegments(ctx, stockholm.SourceSystem, string(f)+"/")
+		if err != nil {
+			logger.Warn("prune orphans failed (non-fatal)", "foreskrift", f, "err", err)
+			pruned = 0
+		}
+
 		logger.Info("ingested",
 			"foreskrift", f,
 			"bytes", len(raw),
@@ -181,6 +193,7 @@ func runIngest(logger *slog.Logger, cfg config.Config, args []string) {
 			"rules", len(resolved),
 			"rules_dropped", dropped,
 			"features_skipped", batch.SkippedFeatures,
+			"segments_pruned", pruned,
 			"elapsed_ms", time.Since(t0).Milliseconds())
 	}
 }

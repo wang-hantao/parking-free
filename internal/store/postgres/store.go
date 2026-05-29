@@ -435,6 +435,34 @@ func (s *Store) UpsertRoadSegments(ctx context.Context, segs []domain.RoadSegmen
 	return ids, err
 }
 
+// PruneOrphanRoadSegments deletes road_segment rows under a given
+// source_system + reference prefix that have no rule_applies_to
+// entries pointing at them. Returns the count of deleted rows.
+//
+// Intended for the ingester to call after each föreskrift's full
+// upsert cycle, scoping by prefix (e.g. system="stockholm.ltf-tolken",
+// prefix="ptillaten/"). Keeps the table consistent with Stockholm's
+// LTF data evolution — features that disappear between snapshots
+// have their rules deleted by UpsertRules' destructive replace, and
+// this method then drops the now-orphan segment rows.
+//
+// Safe because the destructive UpsertRules has already run by the
+// time this is called: any segment with no rule_applies_to entry
+// truly belongs to a removed/renumbered feature.
+func (s *Store) PruneOrphanRoadSegments(ctx context.Context, sourceSystem, prefix string) (int64, error) {
+	if sourceSystem == "" || prefix == "" {
+		return 0, fmt.Errorf("PruneOrphanRoadSegments: sourceSystem and prefix are required")
+	}
+	// $2 is a LIKE pattern; the caller passes "ptillaten/" and we
+	// append %. Keeps the call sites readable without ambiguity over
+	// who appends the wildcard.
+	tag, err := s.pool.Exec(ctx, sqlPruneOrphanRoadSegments, sourceSystem, prefix+"%")
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // UpsertRules destructively replaces all rules for the regulation IDs
 // represented in `rules`: existing rules (and their time-windows /
 // applies-to children, via ON DELETE CASCADE) are removed, then the

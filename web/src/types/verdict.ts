@@ -8,7 +8,7 @@
 // renamed but the old name is still queried.
 
 export type RuleKind = "allow" | "forbid" | "restrict";
-export type VehicleClass = "car" | "motorcycle" | "truck" | "bus" | "trailer";
+export type VehicleClass = "car" | "motorcycle" | "truck" | "bus";
 export type PermitKind =
   | "residential"
   | "disabled"
