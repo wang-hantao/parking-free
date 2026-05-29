@@ -287,3 +287,16 @@ WHERE rs.source_system = $1
     WHERE a.target_id = rs.id
       AND a.target_kind = 'road_segment'
   )`
+
+// sqlPruneAllOrphanRoadSegments is the unscoped counterpart: deletes
+// every orphan road_segment under a source_system regardless of
+// reference prefix. Used by the `cleanup` subcommand to wipe out
+// orphans accumulated before the per-ingest prune logic landed.
+const sqlPruneAllOrphanRoadSegments = `
+DELETE FROM road_segment rs
+WHERE rs.source_system = $1
+  AND NOT EXISTS (
+    SELECT 1 FROM rule_applies_to a
+    WHERE a.target_id = rs.id
+      AND a.target_kind = 'road_segment'
+  )`

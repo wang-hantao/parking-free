@@ -516,3 +516,63 @@ func TestPruneOrphanRoadSegments(t *testing.T) {
 		t.Errorf("second prune should be a no-op; got %d deleted", deleted)
 	}
 }
+
+func TestPruneAllOrphanRoadSegments(t *testing.T) {
+	st, ctx := openTestStore(t)
+
+	// Three orphans across two prefixes + one segment with a rule
+	// (must survive).
+	insertSeg := func(ref string) string {
+		const q = `
+			INSERT INTO road_segment (street_name, municipality, source_system, source_reference, geom)
+			VALUES ('Test', 'Stockholm', 'stockholm.ltf-tolken', $1,
+				ST_GeomFromText('LINESTRING(18.0 59.3, 18.001 59.3)', 4326))
+			RETURNING id::text`
+		var id string
+		if err := st.pool.QueryRow(ctx, q, ref).Scan(&id); err != nil {
+			t.Fatalf("insert %s: %v", ref, err)
+		}
+		return id
+	}
+	insertSeg("ptillaten/1/1")
+	insertSeg("ptillaten/2/1")
+	insertSeg("servicedagar/1/1")
+	keepID := insertSeg("ptillaten/keep/1")
+
+	// Attach a rule to the "keep" segment.
+	var regID string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO regulation (id, source_system, source_reference, decision_authority, language, effective_from)
+		VALUES (gen_random_uuid(), 'stockholm.ltf-tolken', 'cite', 'Stockholms stad', 'sv-SE', NOW())
+		RETURNING id::text`).Scan(&regID); err != nil {
+		t.Fatalf("regulation: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		WITH r AS (
+			INSERT INTO rule (id, regulation_id, kind, max_duration_s, needs_payment, needs_permit, vehicle_classes, priority)
+			VALUES (gen_random_uuid(), $1::uuid, 'allow', 0, false, false, '{}', 5)
+			RETURNING id
+		)
+		INSERT INTO rule_applies_to (rule_id, target_kind, target_id, offset_from_meters, offset_to_meters)
+		SELECT id, 'road_segment', $2::uuid, 0, 0 FROM r`, regID, keepID); err != nil {
+		t.Fatalf("attach rule: %v", err)
+	}
+
+	deleted, err := st.PruneAllOrphanRoadSegments(ctx, "stockholm.ltf-tolken")
+	if err != nil {
+		t.Fatalf("prune all: %v", err)
+	}
+	if deleted != 3 {
+		t.Errorf("want 3 deleted, got %d", deleted)
+	}
+
+	// Only "keep" remains.
+	var remaining int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM road_segment WHERE source_system = 'stockholm.ltf-tolken'`).Scan(&remaining); err != nil {
+		t.Fatalf("count remaining: %v", err)
+	}
+	if remaining != 1 {
+		t.Errorf("want 1 segment remaining, got %d", remaining)
+	}
+}

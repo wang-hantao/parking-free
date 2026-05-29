@@ -51,18 +51,31 @@ func main() {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "dump":
+			requireStockholmKey(logger, cfg)
+			runDump(logger, cfg, args[1:])
+			return
+		case "cleanup":
+			// cleanup is a pure DB operation; no LTF-Tolken API key
+			// needed. Lets users on offline / read-only Stockholm
+			// access still tidy their DB.
+			runCleanup(logger, cfg)
+			return
+		}
+	}
+	requireStockholmKey(logger, cfg)
+	runIngest(logger, cfg, args)
+}
+
+func requireStockholmKey(logger *slog.Logger, cfg config.Config) {
 	if cfg.Stockholm.APIKey == "" {
 		logger.Error("STOCKHOLM_API_KEY is required",
 			"hint", "request a free key at https://openparking.stockholm.se/Home/Key")
 		os.Exit(1)
 	}
-
-	args := os.Args[1:]
-	if len(args) > 0 && args[0] == "dump" {
-		runDump(logger, cfg, args[1:])
-		return
-	}
-	runIngest(logger, cfg, args)
 }
 
 // runIngest is the default ingestion path: fetch full data, transform,
@@ -241,4 +254,39 @@ func runDump(logger *slog.Logger, cfg config.Config, args []string) {
 			"foreskrift", f, "path", out, "bytes", len(raw),
 			"elapsed_ms", time.Since(t0).Milliseconds())
 	}
+}
+
+// runCleanup wipes every orphan road_segment under
+// stockholm.SourceSystem — i.e. segments left behind by previous
+// LTF revisions that no longer have any rule attached. The
+// per-föreskrift prune in runIngest handles steady-state
+// idempotency; this subcommand exists to clean up the accumulation
+// from before that logic landed.
+//
+// Read-only with respect to LTF — no Stockholm API key needed.
+//
+// Usage:
+//
+//	go run ./cmd/ingester cleanup
+func runCleanup(logger *slog.Logger, cfg config.Config) {
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Ingest.Timeout)
+	defer cancel()
+
+	store, err := postgres.Open(ctx, cfg.Postgres.DSN)
+	if err != nil {
+		logger.Error("postgres open failed", "err", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	t0 := time.Now()
+	deleted, err := store.PruneAllOrphanRoadSegments(ctx, stockholm.SourceSystem)
+	if err != nil {
+		logger.Error("cleanup failed", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("cleanup complete",
+		"source_system", stockholm.SourceSystem,
+		"segments_pruned", deleted,
+		"elapsed_ms", time.Since(t0).Milliseconds())
 }

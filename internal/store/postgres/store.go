@@ -463,6 +463,23 @@ func (s *Store) PruneOrphanRoadSegments(ctx context.Context, sourceSystem, prefi
 	return tag.RowsAffected(), nil
 }
 
+// PruneAllOrphanRoadSegments is the unscoped variant: deletes every
+// orphan road_segment under sourceSystem regardless of reference
+// prefix. Used by the `ingester cleanup` command to wipe orphans
+// accumulated before per-ingest prune logic was introduced. For
+// routine maintenance the per-prefix PruneOrphanRoadSegments called
+// during ingest is sufficient.
+func (s *Store) PruneAllOrphanRoadSegments(ctx context.Context, sourceSystem string) (int64, error) {
+	if sourceSystem == "" {
+		return 0, fmt.Errorf("PruneAllOrphanRoadSegments: sourceSystem is required")
+	}
+	tag, err := s.pool.Exec(ctx, sqlPruneAllOrphanRoadSegments, sourceSystem)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // UpsertRules destructively replaces all rules for the regulation IDs
 // represented in `rules`: existing rules (and their time-windows /
 // applies-to children, via ON DELETE CASCADE) are removed, then the

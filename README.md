@@ -161,6 +161,16 @@ prefix that have no `rule_applies_to` entries. The count is logged
 as `segments_pruned`. Net effect: re-ingestion is idempotent — DB
 state matches whatever Stockholm's LTF currently exposes.
 
+To clean up orphans accumulated from before this logic landed (or
+from any ad-hoc data fiddling), run:
+
+```bash
+go run ./cmd/ingester cleanup
+# {"level":"INFO","msg":"cleanup complete","segments_pruned":11786,...}
+```
+
+Pure DB operation — no Stockholm API key required.
+
 ## Frontend
 
 The `web/` directory is a React + Vite + TypeScript single-page app
