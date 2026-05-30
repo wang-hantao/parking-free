@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/wang-hantao/parking-free/internal/adapter/stockholm"
@@ -36,12 +37,41 @@ import (
 
 // Sample-capture defaults — central Stockholm (Stureplan), modest radius
 // and feature count so each dump file stays small enough to paste.
+// Overridable per-run via DUMP_LAT, DUMP_LNG, DUMP_RADIUS_M, DUMP_MAX
+// environment variables — handy when diagnosing a specific spot whose
+// features don't appear in the default sample.
 const (
 	dumpLat         = 59.3330
 	dumpLng         = 18.0681
 	dumpRadiusM     = 2000
 	dumpMaxFeatures = 5
 )
+
+func dumpParams() (lat, lng float64, radiusM, maxFeatures int) {
+	lat, lng = dumpLat, dumpLng
+	radiusM, maxFeatures = dumpRadiusM, dumpMaxFeatures
+	if v := os.Getenv("DUMP_LAT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lat = f
+		}
+	}
+	if v := os.Getenv("DUMP_LNG"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lng = f
+		}
+	}
+	if v := os.Getenv("DUMP_RADIUS_M"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			radiusM = n
+		}
+	}
+	if v := os.Getenv("DUMP_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			maxFeatures = n
+		}
+	}
+	return
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -238,9 +268,13 @@ func runDump(logger *slog.Logger, cfg config.Config, args []string) {
 
 	client := stockholm.NewClient(cfg.Stockholm.BaseURL, cfg.Stockholm.APIKey)
 
+	lat, lng, radiusM, maxFeatures := dumpParams()
+	logger.Info("dump scope",
+		"lat", lat, "lng", lng, "radius_m", radiusM, "max_features", maxFeatures)
+
 	for _, f := range targets {
 		t0 := time.Now()
-		raw, err := client.FetchSample(ctx, f, dumpLat, dumpLng, dumpRadiusM, dumpMaxFeatures)
+		raw, err := client.FetchSample(ctx, f, lat, lng, radiusM, maxFeatures)
 		if err != nil {
 			logger.Error("fetch sample failed", "foreskrift", f, "err", err)
 			continue
