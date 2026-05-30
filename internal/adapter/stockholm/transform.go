@@ -248,10 +248,23 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 			})
 		}
 
-		// Payment / permit semantics from VF_PLATS_TYP and VEHICLE.
+		// Payment / permit semantics from VF_PLATS_TYP, VEHICLE, and
+		// PARKING_RATE.
+		//
+		// Authoritative payment signal: the presence of a tariff
+		// class in PARKING_RATE (Taxa N). Stockholm's tariff classes
+		// only exist for paid parking — a feature with PARKING_RATE
+		// set is by definition fee-paying. VF_PLATS_TYP is free text
+		// and inconsistently includes the word "avgift" — observed
+		// in production: rules with PARKING_RATE = "Taxa 2" but
+		// VF_PLATS_TYP = "PARKERING" (no avgift keyword) at central
+		// Stockholm locations (e.g. Vasagatan area). Trusting the
+		// text alone silently drops payment requirements for entire
+		// streets. So we OR the two signals.
 		typ := strings.ToLower(propStr(props, "VF_PLATS_TYP"))
 		vehicle := strings.ToLower(propStr(props, "VEHICLE"))
-		needsPayment := strings.Contains(typ, "avgift")
+		tariffCode := parseTaxaCode(propStr(props, "PARKING_RATE"))
+		needsPayment := tariffCode != "" || strings.Contains(typ, "avgift")
 		needsPermit := strings.Contains(typ, "rörelsehindrad") ||
 			strings.Contains(vehicle, "rörelsehindrad")
 		var permitKind domain.PermitKind
@@ -283,7 +296,7 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 			NeedsPayment:       needsPayment,
 			NeedsPermit:        needsPermit,
 			RequiredPermitKind: permitKind,
-			TariffClassCode:    parseTaxaCode(propStr(props, "PARKING_RATE")),
+			TariffClassCode:    tariffCode,
 			TimeWindows:        []domain.TimeWindow{tw},
 			AppliesTo: []domain.AppliesTo{{
 				Kind:     domain.TargetRoadSegment,
@@ -396,14 +409,23 @@ func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *Ingest
 			maxDur = time.Duration(m) * time.Minute
 		}
 
-		// Payment is required when VF_PLATS_TYP indicates either
-		// metered ("avgift") or residential ("boende") parking — both
-		// imply that non-permit-holders pay the hourly rate. The
-		// pmotorcykel spots are the first to carry "boende" without
-		// also carrying "avgift", which is why this check lives here
-		// rather than on the static config.
+		// Payment is required when any of three signals are present:
+		//
+		//   1. PARKING_RATE carries a tariff class (Taxa N) — the
+		//      authoritative signal; presence of a tariff means fee.
+		//   2. VF_PLATS_TYP mentions "avgift" (metered)
+		//   3. VF_PLATS_TYP mentions "boende" (residential) — non-
+		//      permit-holders still pay the hourly rate here.
+		//
+		// (1) is added because Stockholm's LTF data is inconsistent
+		// about putting "avgift" in the type text even when a tariff
+		// is attached. Trusting the text alone caused central
+		// Stockholm spots to silently lose their payment requirement.
 		typ := strings.ToLower(propStr(props, "VF_PLATS_TYP"))
-		needsPayment := strings.Contains(typ, "avgift") || strings.Contains(typ, "boende")
+		tariffCode := parseTaxaCode(propStr(props, "PARKING_RATE"))
+		needsPayment := tariffCode != "" ||
+			strings.Contains(typ, "avgift") ||
+			strings.Contains(typ, "boende")
 
 		// Build the time window, layering seasonal month/day onto
 		// the weekday + time-of-day. Engine now honours all of these.
@@ -428,7 +450,7 @@ func transformReservedSpot(fc featureCollection, cfg reservedSpotConfig) *Ingest
 			NeedsPermit:        cfg.needsPermit,
 			RequiredPermitKind: cfg.permitKind,
 			MaxDuration:        maxDur,
-			TariffClassCode:    parseTaxaCode(propStr(props, "PARKING_RATE")),
+			TariffClassCode:    tariffCode,
 			TimeWindows:        []domain.TimeWindow{tw},
 			AppliesTo: []domain.AppliesTo{{
 				Kind:     domain.TargetRoadSegment,

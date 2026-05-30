@@ -1,6 +1,7 @@
 package stockholm
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -758,4 +759,101 @@ func TestTransform_PBuss_CarriesTariffClassCode(t *testing.T) {
 
 func startsWith(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+func TestTransform_Ptillaten_TariffClassTriggersNeedsPayment(t *testing.T) {
+	// Regression: production data at central Stockholm (Olof Palmes
+	// gata / Vasagatan / similar) returns ptillaten features with
+	// PARKING_RATE = "Taxa N" but VF_PLATS_TYP = "PARKERING" (no
+	// "avgift" keyword). Trusting VF_PLATS_TYP alone silently set
+	// NeedsPayment=false on these rules, producing
+	// "Parking allowed" verdicts at clearly fee-paid spots. The
+	// tariff class is the canonical signal; either path should
+	// trigger NeedsPayment.
+	coords := json.RawMessage(`[[18.05,59.33],[18.06,59.34]]`)
+	fc := featureCollection{
+		Type: "FeatureCollection",
+		Features: []feature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"CITATION":      "0180 2020-test",
+					"FID":           12345.0,
+					"EXTENT_NO":     1.0,
+					"STREET_NAME":   "Testgatan",
+					"VF_PLATS_TYP":  "PARKERING", // <-- crucial: no "avgift"
+					"PARKING_RATE":  "Taxa 2: 20 kr/tim vardagar 7-19",
+					"START_WEEKDAY": "MÅNDAG",
+					"START_TIME":    900.0,
+					"END_TIME":      1900.0,
+					"VALID_FROM":    "2020-01-01T00:00:00Z",
+				},
+				Geometry: geometry{Type: "LineString", Coordinates: coords},
+			},
+		},
+	}
+	raw := mustJSON(t, fc)
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(batch.Rules) != 1 {
+		t.Fatalf("want 1 rule, got %d", len(batch.Rules))
+	}
+	r := batch.Rules[0]
+	if !r.NeedsPayment {
+		t.Errorf("NeedsPayment: want true (PARKING_RATE is set), got false")
+	}
+	if r.TariffClassCode != "stockholm.taxa.2" {
+		t.Errorf("TariffClassCode: want stockholm.taxa.2, got %q", r.TariffClassCode)
+	}
+}
+
+func TestTransform_Ptillaten_NoTariffNoAvgift_NoPayment(t *testing.T) {
+	// Sanity: a ptillaten feature with neither PARKING_RATE nor
+	// "avgift" in VF_PLATS_TYP truly is free parking (e.g. a free
+	// 1-hour zone). NeedsPayment must stay false in that case.
+	coords := json.RawMessage(`[[18.05,59.33],[18.06,59.34]]`)
+	fc := featureCollection{
+		Type: "FeatureCollection",
+		Features: []feature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"CITATION":      "0180 2020-free",
+					"FID":           12346.0,
+					"EXTENT_NO":     1.0,
+					"STREET_NAME":   "Friparkeringsgatan",
+					"VF_PLATS_TYP":  "PARKERING",
+					"PARKING_RATE":  "", // <-- truly free
+					"START_WEEKDAY": "MÅNDAG",
+					"START_TIME":    900.0,
+					"END_TIME":      1700.0,
+					"VALID_FROM":    "2020-01-01T00:00:00Z",
+				},
+				Geometry: geometry{Type: "LineString", Coordinates: coords},
+			},
+		},
+	}
+	raw := mustJSON(t, fc)
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(batch.Rules) != 1 {
+		t.Fatalf("want 1 rule, got %d", len(batch.Rules))
+	}
+	r := batch.Rules[0]
+	if r.NeedsPayment {
+		t.Errorf("NeedsPayment: want false (no tariff, no avgift), got true")
+	}
+}
+
+func mustJSON(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json marshal: %v", err)
+	}
+	return b
 }
