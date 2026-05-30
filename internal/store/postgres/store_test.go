@@ -576,3 +576,65 @@ func TestPruneAllOrphanRoadSegments(t *testing.T) {
 		t.Errorf("want 1 segment remaining, got %d", remaining)
 	}
 }
+
+func TestCityOperators_ReturnsSeededStockholmFour(t *testing.T) {
+	// Migration 0008 seeds the four Stockholm operators
+	// (EasyPark, Parkster, Mobill, ePARK) under
+	// service_area_municipality='Stockholm'. CityOperators should
+	// return all of them in alphabetic order with deeplink populated.
+	st, ctx := openTestStore(t)
+
+	// Note: truncate in openTestStore wipes the operator table, so
+	// re-apply the seed for this test. In production runs the
+	// migration handles it.
+	seed := `
+		INSERT INTO operator (name, kind, service_area_municipality, default_deeplink)
+		VALUES
+		  ('EasyPark', 'private',   'Stockholm', 'https://web.easypark.net/'),
+		  ('Parkster', 'private',   'Stockholm', 'https://parkster.com/'),
+		  ('Mobill',   'private',   'Stockholm', 'https://mobill.se/'),
+		  ('ePARK',    'municipal', 'Stockholm', 'https://www.epark.se/'),
+		  ('OtherCity', 'private',  'Göteborg',  'https://other.example/')
+		ON CONFLICT (name) DO UPDATE SET
+		  service_area_municipality = EXCLUDED.service_area_municipality,
+		  default_deeplink          = EXCLUDED.default_deeplink`
+	if _, err := st.pool.Exec(ctx, seed); err != nil {
+		t.Fatalf("seed operators: %v", err)
+	}
+
+	ops, err := st.CityOperators(ctx, "Stockholm", "JAT52Y")
+	if err != nil {
+		t.Fatalf("city operators: %v", err)
+	}
+	if len(ops) != 4 {
+		t.Fatalf("want 4 Stockholm operators, got %d (%+v)", len(ops), ops)
+	}
+
+	wantNames := []string{"EasyPark", "Mobill", "Parkster", "ePARK"}
+	for i, op := range ops {
+		if op.Name != wantNames[i] {
+			t.Errorf("op[%d]: want %q, got %q", i, wantNames[i], op.Name)
+		}
+		if op.Deeplink == "" {
+			t.Errorf("op[%d] (%s): missing deeplink", i, op.Name)
+		}
+	}
+
+	// Empty municipality → nil result (well-defined).
+	none, err := st.CityOperators(ctx, "", "JAT52Y")
+	if err != nil {
+		t.Fatalf("empty municipality: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("empty municipality should return no operators; got %d", len(none))
+	}
+
+	// Different municipality → only its operators.
+	gbg, err := st.CityOperators(ctx, "Göteborg", "JAT52Y")
+	if err != nil {
+		t.Fatalf("göteborg: %v", err)
+	}
+	if len(gbg) != 1 || gbg[0].Name != "OtherCity" {
+		t.Errorf("Göteborg: want [OtherCity]; got %+v", gbg)
+	}
+}

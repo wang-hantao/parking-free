@@ -171,6 +171,37 @@ go run ./cmd/ingester cleanup
 
 Pure DB operation — no Stockholm API key required.
 
+## Payment-app operators
+
+When a location requires payment (`pricing.is_free_now: false` with
+`current_rate.amount > 0`), the verdict surfaces a list of operators
+that can take payment. Two lookup tiers, in order:
+
+1. **Zone-specific** via `operator_zone` — when the location resolves
+   to a known zone polygon, each operator's deeplink template can
+   include the operator-specific area code (e.g. EasyPark "5012").
+   Today the zone table is sparsely populated; this path is for
+   future use.
+
+2. **City-wide fallback** via `operator.service_area_municipality`
+   — when zone-based lookup yields nothing but payment is required,
+   return every operator that serves this municipality. The deeplink
+   is the operator's landing URL; the user types the area code from
+   the on-street sign once their chosen app opens.
+
+Migration `0008_operator_service_area.sql` seeds Stockholm's four
+authorised operators (EasyPark, Parkster, Mobill, ePARK) per the
+city's authorisation system. All four serve the entire municipality
+under a single city contract, so city-wide is the right default.
+Adding a new city means seeding rows with that city's municipality
+and the operators' default landing URLs.
+
+The municipality is inferred in this order: `location.municipality`
+from the `road_segment` lookup, then a prefix mapping over active
+rules' `source.system` (e.g. `stockholm.ltf-tolken` → "Stockholm").
+The second path covers verdicts where ZoneAt returns nothing — the
+operators still surface so the user has actionable payment buttons.
+
 ## Frontend
 
 The `web/` directory is a React + Vite + TypeScript single-page app

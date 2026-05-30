@@ -70,12 +70,16 @@ export interface Rate {
 export interface OperatorOption {
   id: string;
   name: string;
+  // Operator-specific zone code (e.g. EasyPark "5012"). Empty when
+  // the verdict's location couldn't be resolved to a known zone —
+  // the user types the area code from the on-street sign instead.
   external_zone_id?: string;
-  deeplink_url?: string;
-  // The plate-substituted URL the user actually launches. Sometimes
-  // present, sometimes the server only sends the template (we resolve
-  // client-side when needed).
-  app_url?: string;
+  // URL to launch the operator's app or web payment flow. For
+  // Stockholm's four operators this is a landing URL (e.g.
+  // https://web.easypark.net/) — Android/iOS universal-link
+  // handlers route into the installed app when available, browser
+  // otherwise.
+  deeplink?: string;
 }
 
 export interface PricingInfo {

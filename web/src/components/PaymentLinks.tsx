@@ -37,7 +37,10 @@ export function PaymentLinks({ operators }: PaymentLinksProps) {
   if (operators.length === 0) return null;
   return (
     <div>
-      <p className="text-sm font-medium text-slate-700">Pay with</p>
+      <p className="text-sm font-medium text-slate-700">Pay via a parking app</p>
+      <p className="mt-0.5 text-xs text-slate-500">
+        Any of these operators can take payment for this spot.
+      </p>
       <div className="mt-2 flex flex-wrap gap-2">
         {operators.map((op) => {
           const url = resolveLaunchUrl(op);
@@ -64,20 +67,18 @@ export function PaymentLinks({ operators }: PaymentLinksProps) {
   );
 }
 
-// resolveLaunchUrl picks the best URL to launch:
-//   1. Server-resolved app_url (already plate-substituted), or
-//   2. The operator's deeplink_url template (caller-substituted), or
-//   3. A web fallback per operator.
+// resolveLaunchUrl picks the URL to launch:
+//   1. Server-resolved `deeplink` (zone-specific or city-wide).
+//   2. A hardcoded web fallback for the four Stockholm operators.
 function resolveLaunchUrl(op: OperatorOption): string {
-  if (op.app_url) return op.app_url;
-  if (op.deeplink_url) return op.deeplink_url;
+  if (op.deeplink) return op.deeplink;
   return webFallback(op);
 }
 
 function webFallback(op: OperatorOption): string {
   switch (op.id) {
     case "easypark":
-      return "https://easypark.net/";
+      return "https://web.easypark.net/";
     case "parkster":
       return "https://parkster.com/";
     case "mobill":

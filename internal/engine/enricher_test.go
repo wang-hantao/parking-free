@@ -13,13 +13,14 @@ import (
 // is no longer interface-driven — it comes from Rule.TariffClassCode
 // against the registry the Evaluator was constructed with.
 type richSource struct {
-	rules     []domain.Rule
-	permits   map[string][]domain.Permit
-	zone      *domain.ZoneRef
-	street    string
-	muni      string
-	operators []domain.OperatorOption
-	hazards   []domain.Warning
+	rules         []domain.Rule
+	permits       map[string][]domain.Permit
+	zone          *domain.ZoneRef
+	street        string
+	muni          string
+	operators     []domain.OperatorOption
+	cityOperators []domain.OperatorOption
+	hazards       []domain.Warning
 }
 
 func (r *richSource) RulesNearby(_ context.Context, _ domain.Coordinate, _ float64) ([]domain.Rule, error) {
@@ -33,6 +34,9 @@ func (r *richSource) ZoneAt(_ context.Context, _ domain.Coordinate) (*domain.Zon
 }
 func (r *richSource) OperatorsForZone(_ context.Context, _, _ string) ([]domain.OperatorOption, error) {
 	return r.operators, nil
+}
+func (r *richSource) CityOperators(_ context.Context, _, _ string) ([]domain.OperatorOption, error) {
+	return r.cityOperators, nil
 }
 func (r *richSource) HazardsNearby(_ context.Context, _ domain.Coordinate, _ time.Time) ([]domain.Warning, error) {
 	return r.hazards, nil
@@ -322,5 +326,171 @@ func TestEnrich_HazardsFromHazardSource(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected servicedag_upcoming warning; got %+v", v.Warnings)
+	}
+}
+
+// =============================================================================
+// City-wide operator fallback tests
+// =============================================================================
+
+func TestEnrich_CityOperators_AttachedWhenZoneEmptyAndPaymentRequired(t *testing.T) {
+	// The actual scenario the user hit: paid parking applies, but the
+	// query point isn't inside any known zone polygon. Zone-based
+	// lookup returns nothing — CityOperators should kick in so the
+	// user still gets payment-app buttons.
+	at := atUTC(2026, 5, 7, 14, 0)
+	src := &richSource{
+		// Municipality non-empty but zone nil — the typical Stockholm
+		// curb where we know the street but not a zone polygon.
+		muni: "Stockholm",
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:          domain.Source{System: "stockholm.ltf-tolken", Reference: "0180 X"},
+				TariffClassCode: "test.simple",
+				TimeWindows:     []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		// Zone-based returns nothing.
+		operators: nil,
+		// City-wide catalog (mirroring Stockholm's four authorised ops).
+		cityOperators: []domain.OperatorOption{
+			{ID: "easypark", Name: "EasyPark", Deeplink: "https://web.easypark.net/"},
+			{ID: "parkster", Name: "Parkster", Deeplink: "https://parkster.com/"},
+			{ID: "mobill", Name: "Mobill", Deeplink: "https://mobill.se/"},
+			{ID: "epark", Name: "ePARK", Deeplink: "https://www.epark.se/"},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE()).WithTariffClasses(testTariffClasses)
+	v, err := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "JAT52Y", Class: domain.VehicleCar},
+		At:      at,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if v.Pricing == nil {
+		t.Fatalf("expected Pricing")
+	}
+	if len(v.Pricing.Operators) != 4 {
+		t.Fatalf("expected 4 city operators; got %d (%+v)", len(v.Pricing.Operators), v.Pricing.Operators)
+	}
+	names := make(map[string]string)
+	for _, op := range v.Pricing.Operators {
+		names[op.ID] = op.Deeplink
+	}
+	if names["easypark"] != "https://web.easypark.net/" {
+		t.Errorf("easypark deeplink: got %q", names["easypark"])
+	}
+	if names["epark"] == "" {
+		t.Errorf("epark should have a deeplink")
+	}
+}
+
+func TestEnrich_CityOperators_NotAttachedWhenFreeNow(t *testing.T) {
+	// Paid rule exists but it's 22:00 (outside the 09-18 window) — no
+	// payment is needed right now, so operators shouldn't appear.
+	at := atUTC(2026, 5, 7, 22, 0)
+	src := &richSource{
+		muni: "Stockholm",
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:          domain.Source{System: "stockholm.ltf-tolken"},
+				TariffClassCode: "test.simple",
+				TimeWindows:     []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		cityOperators: []domain.OperatorOption{{ID: "easypark", Name: "EasyPark"}},
+	}
+	ev := New(src, NewHolidayCalendarSE()).WithTariffClasses(testTariffClasses)
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      at,
+	})
+	if v.Pricing == nil {
+		t.Fatalf("expected Pricing")
+	}
+	if !v.Pricing.IsFreeNow {
+		t.Errorf("should be free at 22:00")
+	}
+	if len(v.Pricing.Operators) != 0 {
+		t.Errorf("no operators when free; got %d", len(v.Pricing.Operators))
+	}
+}
+
+func TestEnrich_CityOperators_NotAttachedWhenZoneAlreadyHasOperators(t *testing.T) {
+	// If OperatorsForZone returned non-empty operators (real
+	// zone-specific deep-links), don't clobber them with the
+	// city-wide fallback.
+	at := atUTC(2026, 5, 7, 14, 0)
+	src := &richSource{
+		zone: &domain.ZoneRef{ID: "z14", Code: "Zone 14", City: "Stockholm"},
+		muni: "Stockholm",
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:          domain.Source{System: "stockholm.ltf-tolken"},
+				TariffClassCode: "test.simple",
+				TimeWindows:     []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		operators: []domain.OperatorOption{
+			{ID: "easypark", Name: "EasyPark", ExternalZoneID: "5012",
+				Deeplink: "https://web.easypark.net/?areaCode=5012"},
+		},
+		cityOperators: []domain.OperatorOption{
+			{ID: "parkster", Name: "Parkster", Deeplink: "https://parkster.com/"},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE()).WithTariffClasses(testTariffClasses)
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      at,
+	})
+	if len(v.Pricing.Operators) != 1 {
+		t.Fatalf("zone-based should win; got %d operators", len(v.Pricing.Operators))
+	}
+	if v.Pricing.Operators[0].ID != "easypark" {
+		t.Errorf("want easypark, got %s", v.Pricing.Operators[0].ID)
+	}
+	if v.Pricing.Operators[0].ExternalZoneID != "5012" {
+		t.Errorf("zone-specific external_zone_id lost; got %q", v.Pricing.Operators[0].ExternalZoneID)
+	}
+}
+
+func TestEnrich_CityOperators_MunicipalityDerivedFromRuleSource(t *testing.T) {
+	// Edge case the user actually hit: ZoneAt returned everything
+	// empty (no zone, no street, no muni), so v.Location ends up nil.
+	// Without the source-system fallback, we'd have no way to find
+	// "which city are we in?" and operators wouldn't be attached.
+	at := atUTC(2026, 5, 7, 14, 0)
+	src := &richSource{
+		// Everything from ZoneAt is empty — Location stays nil.
+		zone:   nil,
+		street: "",
+		muni:   "",
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				Source:          domain.Source{System: "stockholm.ltf-tolken", Reference: "0180 X"},
+				TariffClassCode: "test.simple",
+				TimeWindows:     []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+		cityOperators: []domain.OperatorOption{
+			{ID: "easypark", Name: "EasyPark", Deeplink: "https://web.easypark.net/"},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE()).WithTariffClasses(testTariffClasses)
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      at,
+	})
+	if v.Location != nil {
+		t.Errorf("test invariant: Location should be nil; got %+v", v.Location)
+	}
+	if len(v.Pricing.Operators) != 1 {
+		t.Fatalf("source-system fallback should attach operators; got %d", len(v.Pricing.Operators))
 	}
 }

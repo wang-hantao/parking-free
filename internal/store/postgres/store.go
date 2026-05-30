@@ -321,6 +321,41 @@ func (s *Store) OperatorsForZone(ctx context.Context, zoneID, plate string) ([]d
 	return out, rows.Err()
 }
 
+// CityOperators returns operators that serve an entire municipality
+// (no zone refinement), with their default landing URL set as the
+// Deeplink. Used as a fallback when OperatorsForZone returns empty
+// — payment is required at this location but we don't know which
+// zone it's in.
+//
+// `plate` is passed through expandDeeplink for templates that
+// happen to include a {plate} placeholder; Stockholm's seeded
+// landing URLs don't, but the substitution stays cheap and makes
+// future templates trivial to add.
+func (s *Store) CityOperators(ctx context.Context, municipality, plate string) ([]domain.OperatorOption, error) {
+	if municipality == "" {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, sqlCityOperators, municipality)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: city operators: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.OperatorOption
+	for rows.Next() {
+		var op domain.OperatorOption
+		var deeplinkTpl string
+		if err := rows.Scan(&op.ID, &op.Name, &deeplinkTpl); err != nil {
+			return nil, err
+		}
+		if deeplinkTpl != "" {
+			op.Deeplink = expandDeeplink(deeplinkTpl, "", plate)
+		}
+		out = append(out, op)
+	}
+	return out, rows.Err()
+}
+
 // expandDeeplink does a tiny string substitution. Kept simple — text/template
 // is overkill and slow at this volume.
 func expandDeeplink(tpl, externalZoneID, plate string) string {

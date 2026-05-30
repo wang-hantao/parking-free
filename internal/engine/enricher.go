@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/wang-hantao/parking-free/internal/domain"
@@ -30,6 +31,17 @@ type ZoneSource interface {
 // OperatorSource returns the operators that can take payment for a zone.
 type OperatorSource interface {
 	OperatorsForZone(ctx context.Context, zoneID, plate string) ([]domain.OperatorOption, error)
+}
+
+// CityOperatorSource returns the operators that serve an entire
+// municipality, regardless of zone. Used as a fallback when
+// OperatorsForZone yields nothing but payment is required. In
+// Stockholm all four authorised operators (EasyPark, Parkster,
+// Mobill, ePARK) serve the whole city; future cities with operator-
+// per-zone contracts can still implement OperatorSource alongside
+// this for richer mapping.
+type CityOperatorSource interface {
+	CityOperators(ctx context.Context, municipality, plate string) ([]domain.OperatorOption, error)
 }
 
 // HazardSource returns predictive warnings near a position.
@@ -65,7 +77,20 @@ func (e *Evaluator) enrich(ctx context.Context, q Query, v *domain.Verdict, acti
 	// the in-process class registry. No store interface needed.
 	v.Pricing = e.pricingFromActive(q, active)
 
-	// Operators (only populates if we know the zone).
+	// Operators. Two-tier lookup:
+	//
+	//   1. Zone-based via OperatorsForZone, when a zone matches. Each
+	//      operator may have a zone-specific deeplink template (with
+	//      a real external_zone_id substituted into the URL).
+	//
+	//   2. City-wide via CityOperators, when zone-based yields
+	//      nothing but payment is required. The operator's default
+	//      landing URL — user types the area code from the on-street
+	//      sign after the app opens.
+	//
+	// Stockholm uses (2) almost exclusively today: the four
+	// authorised operators all serve the whole municipality and we
+	// don't ingest operator-specific zone mappings.
 	if v.Location != nil && v.Location.Zone != nil {
 		if os, ok := e.src.(OperatorSource); ok {
 			if ops, err := os.OperatorsForZone(ctx, v.Location.Zone.ID, q.Vehicle.Plate); err == nil {
@@ -73,6 +98,25 @@ func (e *Evaluator) enrich(ctx context.Context, q Query, v *domain.Verdict, acti
 					v.Pricing = &domain.PricingInfo{}
 				}
 				v.Pricing.Operators = ops
+			}
+		}
+	}
+	if needsPaymentOperators(v) {
+		municipality := ""
+		if v.Location != nil {
+			municipality = v.Location.Municipality
+		}
+		if municipality == "" {
+			municipality = municipalityFromActiveRules(active)
+		}
+		if municipality != "" {
+			if cos, ok := e.src.(CityOperatorSource); ok {
+				if ops, err := cos.CityOperators(ctx, municipality, q.Vehicle.Plate); err == nil && len(ops) > 0 {
+					if v.Pricing == nil {
+						v.Pricing = &domain.PricingInfo{}
+					}
+					v.Pricing.Operators = ops
+				}
 			}
 		}
 	}
@@ -358,4 +402,46 @@ func costPerWindow(w TariffWindowSpec, from, to time.Time) float64 {
 	}
 	dur := to.Sub(from).Seconds()
 	return w.Rate * (dur / float64(w.PerSec))
+}
+
+// needsPaymentOperators reports whether the verdict should be
+// augmented with payment-app operators. True when payment is
+// actually required right now (not just "available later") AND no
+// operators have been attached yet.
+//
+// Conservative on "right now": if pricing is currently free (e.g.
+// query at 22:00 when paid hours are 09-17), we suppress operators
+// — the user doesn't need to pay until the rate kicks in. That's
+// generally what people expect; if it becomes confusing we can
+// surface a "you'll need to pay starting at X" hint instead.
+func needsPaymentOperators(v *domain.Verdict) bool {
+	if v == nil || v.Pricing == nil {
+		return false
+	}
+	if v.Pricing.IsFreeNow {
+		return false
+	}
+	if v.Pricing.CurrentRate == nil || v.Pricing.CurrentRate.Amount <= 0 {
+		return false
+	}
+	return len(v.Pricing.Operators) == 0
+}
+
+// municipalityFromActiveRules infers the municipality from the
+// source.system field of the active rules. Useful when the
+// enricher's ZoneAt path didn't populate v.Location (no zone
+// polygon matched and no road_segment within the sqlStreetAt
+// radius). Knowing the city is enough to surface city-wide payment
+// operators.
+//
+// For now this is a hardcoded prefix mapping — Stockholm is the
+// only city wired up. Future cities would extend the switch.
+func municipalityFromActiveRules(active []scoredRule) string {
+	for _, s := range active {
+		switch {
+		case strings.HasPrefix(s.rule.Source.System, "stockholm."):
+			return "Stockholm"
+		}
+	}
+	return ""
 }

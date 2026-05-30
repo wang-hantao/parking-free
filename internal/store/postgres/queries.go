@@ -191,6 +191,22 @@ JOIN operator_zone oz ON oz.operator_id = o.id
 WHERE oz.maps_to_zone_id = $1
 ORDER BY o.name`
 
+// sqlCityOperators returns the operators that serve an entire
+// municipality, regardless of zone. Used as a fallback when the
+// zone-based lookup yields nothing (the location isn't inside any
+// known zone polygon) but payment is still required.
+//
+// The deeplink here is the operator's default landing URL, not a
+// plate-substituted deep link — Stockholm's four operators don't
+// publicly support a URL parameter format for "start parking at
+// area X with plate Y". The user opens the operator's app or
+// webapp and types the area code from the on-street sign.
+const sqlCityOperators = `
+SELECT id::text, name, COALESCE(default_deeplink, '')
+FROM operator
+WHERE service_area_municipality = $1
+ORDER BY name`
+
 // --- Upserts ------------------------------------------------------------
 
 // UpsertRegulation: idempotent on (source_system, source_reference).

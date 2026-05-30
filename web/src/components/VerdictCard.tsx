@@ -39,9 +39,19 @@ export function VerdictCard({ verdict }: VerdictCardProps) {
 
       {verdict.constraints && <ConstraintsBlock constraints={verdict.constraints} />}
 
-      {verdict.needs_action && verdict.needs_action.length > 0 && (
-        <NeedsActionBlock actions={verdict.needs_action} />
-      )}
+      {(() => {
+        // pay_via_app becomes redundant text when we're about to
+        // render operator buttons below. Strip it from the textual
+        // needs_action list in that case; keep other actions (e.g.
+        // obtain_permit) visible.
+        const ops = verdict.pricing?.operators ?? [];
+        const actions = (verdict.needs_action ?? []).filter(
+          (a) => !(a === "pay_via_app" && ops.length > 0),
+        );
+        return (
+          actions.length > 0 && <NeedsActionBlock actions={actions} />
+        );
+      })()}
 
       {verdict.pricing?.operators && verdict.pricing.operators.length > 0 && (
         <div className="mt-4 border-t border-slate-100 pt-4">
