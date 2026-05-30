@@ -141,7 +141,19 @@ func (s *Store) RulesNearby(ctx context.Context, pos domain.Coordinate, radiusM 
 //     street.
 const (
 	strictAnchorSearchM = 30.0
-	strictCoLocatedM    = 2.0
+	// strictCoLocatedM controls how far from the anchor segment we
+	// pull in additional rules. Sized to capture the "adjacent
+	// section of the same curb" semantics: along a Stockholm street,
+	// general paid parking and short reserved bays (cykel,
+	// beskickningsbil, taxi, etc.) sit sequentially — a 6-10m
+	// reserved bay might be flanked by a 30m paid strip in either
+	// direction. A 2m radius caught the bay's immediate neighbors
+	// but not the adjacent paid strip; 8m is wide enough to bridge
+	// that without bleeding to the opposite curb on a normal-width
+	// street (12-15m wide → the other curb's segment is still
+	// ≥6-7m beyond our 8m reach, since the anchor is along ONE
+	// curb's center-line, not the road center).
+	strictCoLocatedM = 8.0
 )
 
 // RulesAt is the strict-mode counterpart to RulesNearby. It returns

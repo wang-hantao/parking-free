@@ -42,6 +42,15 @@ const (
 	VehicleBus        VehicleClass = "bus"
 	VehicleTruck      VehicleClass = "truck"
 	VehicleEV         VehicleClass = "ev"
+
+	// Reserved-class spots commonly seen in Stockholm LTF data.
+	// Stockholm reserves curb sections via short bays (~5-15m long)
+	// for specific vehicle classes; the engine's class-reservation
+	// logic blocks non-matching vehicles at those bays.
+	VehicleBicycle    VehicleClass = "bicycle"    // cykel
+	VehicleTaxi       VehicleClass = "taxi"       // taxi
+	VehicleRental     VehicleClass = "rental"     // hyrbil
+	VehicleDiplomatic VehicleClass = "diplomatic" // beskickningsfordon
 )
 
 // Vehicle is the subject of a parking-permission query.

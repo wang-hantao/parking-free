@@ -653,6 +653,16 @@ func vehicleClassPhrase(c domain.VehicleClass) string {
 		return "trucks"
 	case domain.VehicleMotorcycle:
 		return "motorcycles"
+	case domain.VehicleEV:
+		return "electric vehicles"
+	case domain.VehicleBicycle:
+		return "bicycles"
+	case domain.VehicleTaxi:
+		return "taxis"
+	case domain.VehicleRental:
+		return "rental cars"
+	case domain.VehicleDiplomatic:
+		return "diplomatic vehicles"
 	default:
 		return string(c)
 	}

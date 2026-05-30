@@ -857,3 +857,125 @@ func mustJSON(t *testing.T, v interface{}) []byte {
 	}
 	return b
 }
+
+func TestTransform_Ptillaten_ReservedClass_Cykel(t *testing.T) {
+	// Stockholm LTF returns reserved-class bays inside the ptillaten
+	// endpoint. A bicycle bay has VEHICLE="cykel" and VF_PLATS_TYP
+	// = "Reserverad p-plats cykel". Engine needs VehicleClasses set
+	// so non-bicycle vehicles get blocked.
+	coords := json.RawMessage(`[[18.05,59.33],[18.06,59.34]]`)
+	fc := featureCollection{
+		Type: "FeatureCollection",
+		Features: []feature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"CITATION":     "0180 2017-11018",
+					"FID":          15633.0,
+					"EXTENT_NO":    9866.0,
+					"STREET_NAME":  "Gamla Brogatan",
+					"VEHICLE":      "cykel",
+					"VF_PLATS_TYP": "Reserverad p-plats cykel",
+					"PARKING_RATE": "avgiftsfri",
+					"VALID_FROM":   "2017-12-01T23:00:00Z",
+				},
+				Geometry: geometry{Type: "LineString", Coordinates: coords},
+			},
+		},
+	}
+	raw := mustJSON(t, fc)
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(batch.Rules) != 1 {
+		t.Fatalf("want 1 rule, got %d", len(batch.Rules))
+	}
+	r := batch.Rules[0]
+	if len(r.VehicleClasses) != 1 || r.VehicleClasses[0] != domain.VehicleBicycle {
+		t.Errorf("VehicleClasses: want [bicycle], got %v", r.VehicleClasses)
+	}
+	if r.Priority != 20 {
+		t.Errorf("Priority: want 20 (reserved-class supersedes general), got %d", r.Priority)
+	}
+	if r.NeedsPayment {
+		t.Errorf("NeedsPayment: want false (avgiftsfri), got true")
+	}
+}
+
+func TestTransform_Ptillaten_ReservedClass_Beskickningsfordon(t *testing.T) {
+	// Diplomatic vehicle bay. Same shape, different class.
+	coords := json.RawMessage(`[[18.05,59.33],[18.06,59.34]]`)
+	fc := featureCollection{
+		Type: "FeatureCollection",
+		Features: []feature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"CITATION":     "0180 2020-04269",
+					"FID":          14773.0,
+					"EXTENT_NO":    3027.0,
+					"STREET_NAME":  "Gamla Brogatan",
+					"VEHICLE":      "beskickningsfordon",
+					"VF_PLATS_TYP": "Reserverad p-plats beskickningsbil",
+					"PARKING_RATE": "avgiftsfri",
+					"VALID_FROM":   "2020-06-24T22:00:00Z",
+				},
+				Geometry: geometry{Type: "LineString", Coordinates: coords},
+			},
+		},
+	}
+	raw := mustJSON(t, fc)
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	r := batch.Rules[0]
+	if len(r.VehicleClasses) != 1 || r.VehicleClasses[0] != domain.VehicleDiplomatic {
+		t.Errorf("VehicleClasses: want [diplomatic], got %v", r.VehicleClasses)
+	}
+	if r.Priority != 20 {
+		t.Errorf("Priority: want 20, got %d", r.Priority)
+	}
+}
+
+func TestTransform_Ptillaten_GeneralFordon_NoClassRestriction(t *testing.T) {
+	// VEHICLE="fordon" means general parking — no class restriction.
+	// Ensures the new reserved-class detection doesn't accidentally
+	// fire on general features.
+	coords := json.RawMessage(`[[18.05,59.33],[18.06,59.34]]`)
+	fc := featureCollection{
+		Type: "FeatureCollection",
+		Features: []feature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"CITATION":     "0180 2020-general",
+					"FID":          99999.0,
+					"EXTENT_NO":    1.0,
+					"STREET_NAME":  "Testgatan",
+					"VEHICLE":      "fordon",
+					"VF_PLATS_TYP": "P Avgift, boende",
+					"PARKING_RATE": "taxa 3: 20 kr/tim",
+					"VALID_FROM":   "2020-01-01T00:00:00Z",
+				},
+				Geometry: geometry{Type: "LineString", Coordinates: coords},
+			},
+		},
+	}
+	raw := mustJSON(t, fc)
+	batch, err := Transform(PTillaten, raw)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	r := batch.Rules[0]
+	if len(r.VehicleClasses) != 0 {
+		t.Errorf("VehicleClasses: want empty, got %v", r.VehicleClasses)
+	}
+	if r.Priority != 5 {
+		t.Errorf("Priority: want 5 (general), got %d", r.Priority)
+	}
+	if !r.NeedsPayment {
+		t.Errorf("NeedsPayment: want true (Taxa 3 set), got false")
+	}
+}

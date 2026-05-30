@@ -272,6 +272,22 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 			permitKind = domain.PermitDisabled
 		}
 
+		// Reserved-class detection. Stockholm's ptillaten endpoint
+		// returns reserved-bay features alongside general paid
+		// parking — phrases like "Reserverad p-plats cykel" (bicycle
+		// bay), "...beskickningsbil" (diplomatic), "...taxi" — and
+		// the engine needs to know these are class-restricted so
+		// non-matching vehicles get blocked rather than seeing a
+		// generic "Parking allowed". Without this extraction the
+		// engine treats them as unrestricted Allow rules and would
+		// happily tell a car it can park at a bicycle bay.
+		//
+		// The VEHICLE field carries the canonical class name; map
+		// the common ones to domain.VehicleClass. "fordon" (general)
+		// and "rörelsehindrade" (handled via NeedsPermit above) fall
+		// through with no class restriction.
+		classes := reservedClassFromVehicle(vehicle, typ)
+
 		startHHMM := propInt(props, "START_TIME")
 		endHHMM := propInt(props, "END_TIME")
 		weekday := propStr(props, "START_WEEKDAY")
@@ -281,11 +297,11 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 
 		// Priority: 5 by default (general paid parking). Bumped to
 		// 20 when this ptillaten feature carries a permit requirement
-		// (e.g. rörelsehindrad-flagged ptillaten = a disabled-permit
-		// holder spot inside the broader paid-parking strip). At 20
-		// it supersedes a co-located general allow.
+		// or a vehicle-class reservation — both are "more specific
+		// than general parking" and should supersede a co-located
+		// general allow.
 		priority := 5
-		if needsPermit {
+		if needsPermit || len(classes) > 0 {
 			priority = 20
 		}
 
@@ -293,6 +309,7 @@ func transformPTillaten(fc featureCollection) *IngestBatch {
 			RegulationID:       citation, // placeholder
 			Kind:               domain.RuleAllow,
 			Priority:           priority,
+			VehicleClasses:     classes,
 			NeedsPayment:       needsPayment,
 			NeedsPermit:        needsPermit,
 			RequiredPermitKind: permitKind,
@@ -587,6 +604,43 @@ func linestringWKT(coords [][]float64) string {
 		parts = append(parts, fmt.Sprintf("%.6f %.6f", c[0], c[1]))
 	}
 	return "LINESTRING(" + strings.Join(parts, ",") + ")"
+}
+
+// reservedClassFromVehicle maps the LTF VEHICLE field value to a
+// domain.VehicleClass when the feature represents a class-restricted
+// reserved bay. Returns an empty slice when:
+//
+//   - VEHICLE is "fordon" (general — no class restriction)
+//   - VEHICLE is "rörelsehindrade" (handled separately via
+//     NeedsPermit + RequiredPermitKind, not as a class restriction)
+//   - VEHICLE is unrecognised (forward-compatible: a new class added
+//     by Stockholm won't crash us, just falls through to general)
+//
+// Only inspects the VEHICLE field. The typ ("VF_PLATS_TYP") arg is
+// reserved for future use — some Stockholm features encode the class
+// only in the typ text. None of the current production data does, so
+// kept the signature for symmetry without using it yet.
+func reservedClassFromVehicle(vehicle, typ string) []domain.VehicleClass {
+	_ = typ
+	switch {
+	case strings.Contains(vehicle, "cykel"):
+		return []domain.VehicleClass{domain.VehicleBicycle}
+	case strings.Contains(vehicle, "beskickning"):
+		return []domain.VehicleClass{domain.VehicleDiplomatic}
+	case strings.Contains(vehicle, "taxi"):
+		return []domain.VehicleClass{domain.VehicleTaxi}
+	case strings.Contains(vehicle, "hyrbil"):
+		return []domain.VehicleClass{domain.VehicleRental}
+	case strings.Contains(vehicle, "elfordon") || strings.Contains(vehicle, "laddbar"):
+		return []domain.VehicleClass{domain.VehicleEV}
+	case strings.Contains(vehicle, "motorcykel"):
+		return []domain.VehicleClass{domain.VehicleMotorcycle}
+	case strings.Contains(vehicle, "lastbil"):
+		return []domain.VehicleClass{domain.VehicleTruck}
+	case strings.Contains(vehicle, "buss"):
+		return []domain.VehicleClass{domain.VehicleBus}
+	}
+	return nil
 }
 
 // taxaRE matches the "taxa N" prefix that every Stockholm
