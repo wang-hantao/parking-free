@@ -344,7 +344,22 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 		verdict.Reasons = append(verdict.Reasons, sr.reason)
 	}
 
-	verdict.Summary = computeSummary(verdict.Allowed, forbidFired, verdict.NeedsAction)
+	// Collect the vehicle classes from reserved-class rules that
+	// blocked this user — the summary uses these to produce an
+	// honest message instead of the generic "require a permit" text
+	// when the actual blockers are class reservations.
+	var blockingClasses []domain.VehicleClass
+	for _, s := range active {
+		if s.rule.Kind != domain.RuleAllow && s.rule.Kind != domain.RuleRestrict {
+			continue
+		}
+		if len(s.rule.VehicleClasses) == 0 || s.rule.MatchesVehicle(q.Vehicle) {
+			continue
+		}
+		blockingClasses = appendUniqueClasses(blockingClasses, s.rule.VehicleClasses...)
+	}
+
+	verdict.Summary = computeSummary(verdict.Allowed, forbidFired, verdict.NeedsAction, blockingClasses)
 	verdict.Reasons = dedupeReasonsByCitation(verdict.Reasons)
 
 	// Stamp the effective query mode before enrichment so clients can
@@ -520,13 +535,22 @@ func appendUnique(s []string, v string) []string {
 // verdict, intended for direct display. The detailed reasons array
 // remains the source of truth; this just gives clients a ready-made
 // label.
-func computeSummary(allowed, forbidFired bool, needsAction []string) string {
+func computeSummary(allowed, forbidFired bool, needsAction []string, blockingClasses []domain.VehicleClass) string {
 	needsPay := containsString(needsAction, "pay_via_app")
 	needsPermit := containsString(needsAction, "obtain_permit")
 
 	if !allowed {
 		if forbidFired {
 			return "Parking forbidden at this location"
+		}
+		// Class reservations and permit requirements are different
+		// kinds of blockers — say which one applies. Class beats
+		// permit in the message when both are present because class
+		// is the more concrete signal ("reserved for taxis" tells
+		// the user there's nothing they can do; "needs a permit"
+		// leaves them wondering which permit).
+		if len(blockingClasses) > 0 {
+			return "Parking not permitted: reserved for " + joinClassPhrases(blockingClasses)
 		}
 		return "Parking not permitted: nearby spots require a permit you don't have"
 	}
@@ -544,6 +568,54 @@ func computeSummary(allowed, forbidFired bool, needsAction []string) string {
 	default:
 		return "Parking allowed"
 	}
+}
+
+// joinClassPhrases turns a list of vehicle classes into a readable
+// English fragment ("bicycles", "bicycles and diplomatic vehicles",
+// "bicycles, taxis, and diplomatic vehicles").
+func joinClassPhrases(classes []domain.VehicleClass) string {
+	if len(classes) == 0 {
+		return ""
+	}
+	phrases := make([]string, 0, len(classes))
+	for _, c := range classes {
+		phrases = append(phrases, vehicleClassPhrase(c))
+	}
+	switch len(phrases) {
+	case 1:
+		return phrases[0]
+	case 2:
+		return phrases[0] + " and " + phrases[1]
+	default:
+		out := ""
+		for i, p := range phrases {
+			switch {
+			case i == 0:
+				out = p
+			case i == len(phrases)-1:
+				out += ", and " + p
+			default:
+				out += ", " + p
+			}
+		}
+		return out
+	}
+}
+
+func appendUniqueClasses(dst []domain.VehicleClass, classes ...domain.VehicleClass) []domain.VehicleClass {
+	for _, c := range classes {
+		seen := false
+		for _, existing := range dst {
+			if existing == c {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			dst = append(dst, c)
+		}
+	}
+	return dst
 }
 
 func containsString(s []string, v string) bool {

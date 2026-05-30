@@ -1337,3 +1337,40 @@ func TestEvaluate_HumaniseClassReservation(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluate_Summary_ClassReservedReportsClasses(t *testing.T) {
+	// Regression: previously the summary said "require a permit you
+	// don't have" even when the actual blockers were vehicle-class
+	// reservations. Confirm the summary now names the classes.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "bike-bay", Kind: domain.RuleAllow,
+				VehicleClasses: []domain.VehicleClass{domain.VehicleBicycle},
+				Priority:       20,
+				TimeWindows:    []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+			{
+				ID: "diplomatic-bay", Kind: domain.RuleAllow,
+				VehicleClasses: []domain.VehicleClass{domain.VehicleDiplomatic},
+				Priority:       20,
+				TimeWindows:    []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if v.Allowed {
+		t.Fatalf("car should be blocked by both reserved bays")
+	}
+	if !contains([]string{v.Summary}, "Parking not permitted: reserved for bicycles and diplomatic vehicles") {
+		t.Errorf("summary should name the classes; got %q", v.Summary)
+	}
+	if contains([]string{v.Summary}, "require a permit") {
+		t.Errorf("summary should NOT mention permits; got %q", v.Summary)
+	}
+}
