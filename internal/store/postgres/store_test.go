@@ -638,3 +638,168 @@ func TestCityOperators_ReturnsSeededStockholmFour(t *testing.T) {
 		t.Errorf("Göteborg: want [OtherCity]; got %+v", gbg)
 	}
 }
+
+// =============================================================================
+// Strict-mode road-segment resolution — two-step anchor approach.
+// =============================================================================
+
+// seedRoadSegmentAt inserts a tiny line at (lng,lat) and returns the
+// new road_segment's UUID. Differs from seedRoadSegment by also
+// taking a source_reference and returning the ID for direct rule
+// attachment.
+func seedRoadSegmentAt(t *testing.T, st *Store, lng, lat float64, ref string) string {
+	t.Helper()
+	const q = `
+		INSERT INTO road_segment (street_name, municipality, source_system, source_reference, geom)
+		VALUES ($1, 'Stockholm', 'stockholm.ltf-tolken', $1,
+			ST_GeomFromText('LINESTRING(' || ($2 - 0.0001) || ' ' || $3 || ',' || ($2 + 0.0001) || ' ' || $3 || ')', 4326))
+		RETURNING id::text`
+	var id string
+	if err := st.pool.QueryRow(context.Background(), q, ref, lng, lat).Scan(&id); err != nil {
+		t.Fatalf("seed segment %s: %v", ref, err)
+	}
+	return id
+}
+
+// seedRuleOnSegment attaches a minimal rule to a specific road_segment.
+func seedRuleOnSegment(t *testing.T, st *Store, segID, regRef string, kind domain.RuleKind, priority int) {
+	t.Helper()
+	ctx := context.Background()
+	// Idempotent regulation upsert (one regulation can carry many rules).
+	const regQ = `
+		INSERT INTO regulation (id, source_system, source_reference, decision_authority, language, effective_from)
+		VALUES (gen_random_uuid(), 'stockholm.ltf-tolken', $1, 'Stockholms stad', 'sv-SE', NOW())
+		ON CONFLICT (source_system, source_reference) DO UPDATE SET updated_at = NOW()
+		RETURNING id::text`
+	var regID string
+	if err := st.pool.QueryRow(ctx, regQ, regRef).Scan(&regID); err != nil {
+		t.Fatalf("regulation %s: %v", regRef, err)
+	}
+	const ruleQ = `
+		WITH r AS (
+			INSERT INTO rule (id, regulation_id, kind, max_duration_s, needs_payment, needs_permit, vehicle_classes, priority)
+			VALUES (gen_random_uuid(), $1::uuid, $2, 0, false, false, '{}', $3)
+			RETURNING id
+		)
+		INSERT INTO rule_applies_to (rule_id, target_kind, target_id, offset_from_meters, offset_to_meters)
+		SELECT id, 'road_segment', $4::uuid, 0, 0 FROM r`
+	if _, err := st.pool.Exec(ctx, ruleQ, regID, string(kind), priority, segID); err != nil {
+		t.Fatalf("attach rule: %v", err)
+	}
+}
+
+func TestRulesAt_AnchorsAcrossGpsOffset(t *testing.T) {
+	// Scenario: rule-bearing segment is ~8m east of the user. A flat
+	// 5m radius would silently drop it; the two-step anchor approach
+	// locks onto it because it's the nearest rule-bearing segment
+	// within the 30m sanity bound.
+	st, ctx := openTestStore(t)
+
+	// User at (18.05947, 59.33568). Place a rule-bearing segment ~8m
+	// east. At Stockholm's latitude, 1° lng ≈ 56000m, so 8m ≈ 0.00014°.
+	segID := seedRoadSegmentAt(t, st, 18.05947+0.00014, 59.33568, "ptillaten/test/1")
+	seedRuleOnSegment(t, st, segID, "test-cite-1", domain.RuleAllow, 5)
+
+	rules, err := st.RulesAt(ctx, domain.Coordinate{Lat: 59.33568, Lng: 18.05947})
+	if err != nil {
+		t.Fatalf("rules-at: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Errorf("want 1 rule from segment ~8m away, got %d", len(rules))
+	}
+}
+
+func TestRulesAt_CapturesCoLocatedRules(t *testing.T) {
+	// Scenario: a disabled bay carved into a paid strip. Two
+	// segments, ~1m apart, both with rules. The anchor finds one,
+	// the co-located radius (2m) picks up the other.
+	st, ctx := openTestStore(t)
+
+	// ~5m east of the user, slightly south
+	stripID := seedRoadSegmentAt(t, st, 18.05947+0.00009, 59.33568, "ptillaten/strip/1")
+	// ~1m offset from the strip
+	bayID := seedRoadSegmentAt(t, st, 18.05947+0.00009, 59.33568+0.000009, "prorelsehindrad/bay/1")
+
+	seedRuleOnSegment(t, st, stripID, "strip-cite", domain.RuleAllow, 5)
+	seedRuleOnSegment(t, st, bayID, "bay-cite", domain.RuleAllow, 20)
+
+	rules, err := st.RulesAt(ctx, domain.Coordinate{Lat: 59.33568, Lng: 18.05947})
+	if err != nil {
+		t.Fatalf("rules-at: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Errorf("want 2 rules (anchor + co-located), got %d", len(rules))
+	}
+}
+
+func TestRulesAt_DoesNotBleedAcrossStreet(t *testing.T) {
+	// Scenario: user is at street A (close), but there's a
+	// rule-bearing segment on street B (~15m away, across the
+	// street). The 2m co-located radius around the anchor (street A)
+	// excludes street B's rules.
+	st, ctx := openTestStore(t)
+
+	// Street A: 5m east, with a rule
+	streetAID := seedRoadSegmentAt(t, st, 18.05947+0.00009, 59.33568, "ptillaten/streetA/1")
+	seedRuleOnSegment(t, st, streetAID, "A-cite", domain.RuleAllow, 5)
+
+	// Street B: 15m west (~0.00027° lng), with a rule of its own
+	streetBID := seedRoadSegmentAt(t, st, 18.05947-0.00027, 59.33568, "ptillaten/streetB/1")
+	seedRuleOnSegment(t, st, streetBID, "B-cite", domain.RuleAllow, 5)
+
+	rules, err := st.RulesAt(ctx, domain.Coordinate{Lat: 59.33568, Lng: 18.05947})
+	if err != nil {
+		t.Fatalf("rules-at: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Errorf("want 1 rule (anchored to closer street A), got %d", len(rules))
+	}
+	if len(rules) == 1 && rules[0].Source.Reference != "A-cite" {
+		t.Errorf("want street A's rule, got source=%q", rules[0].Source.Reference)
+	}
+}
+
+func TestRulesAt_NothingWhenFarFromAnyRuleBearingSegment(t *testing.T) {
+	// Scenario: user is 100m from any rule-bearing segment. Past the
+	// 30m sanity bound — return nothing rather than reach to a
+	// distant road. Important: the user being inside a building, in
+	// a park, or at unmapped infrastructure should produce an empty
+	// verdict, not a misleading "you're allowed here" derived from
+	// a road 100m away.
+	st, ctx := openTestStore(t)
+
+	// Segment 100m east of the user (~0.0018° lng at this latitude)
+	segID := seedRoadSegmentAt(t, st, 18.05947+0.0018, 59.33568, "ptillaten/distant/1")
+	seedRuleOnSegment(t, st, segID, "distant-cite", domain.RuleAllow, 5)
+
+	rules, err := st.RulesAt(ctx, domain.Coordinate{Lat: 59.33568, Lng: 18.05947})
+	if err != nil {
+		t.Fatalf("rules-at: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("want 0 rules (segment beyond sanity bound), got %d", len(rules))
+	}
+}
+
+func TestRulesAt_IgnoresOrphanSegmentsAsAnchor(t *testing.T) {
+	// Scenario: an orphan segment (no rule_applies_to entries) sits
+	// closer to the user than a rule-bearing segment. The anchor
+	// must skip the orphan and lock onto the rule-bearing one —
+	// otherwise the original v1 bug returns.
+	st, ctx := openTestStore(t)
+
+	// Orphan: 3m east, no rules
+	seedRoadSegmentAt(t, st, 18.05947+0.000054, 59.33568, "ptillaten/orphan/1")
+
+	// Rule-bearing: 12m east, with rules
+	realID := seedRoadSegmentAt(t, st, 18.05947+0.00021, 59.33568, "ptillaten/real/1")
+	seedRuleOnSegment(t, st, realID, "real-cite", domain.RuleAllow, 5)
+
+	rules, err := st.RulesAt(ctx, domain.Coordinate{Lat: 59.33568, Lng: 18.05947})
+	if err != nil {
+		t.Fatalf("rules-at: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Errorf("want 1 rule (anchor must skip orphan), got %d", len(rules))
+	}
+}

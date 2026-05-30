@@ -106,24 +106,50 @@ func (s *Store) RulesNearby(ctx context.Context, pos domain.Coordinate, radiusM 
 	return rules, nil
 }
 
-// strictSegmentRadiusM is the radius around the query point used by
-// strict-mode road-segment resolution. Returns rules from all
-// segments within this distance — naturally captures the multiple
-// overlapping föreskrifter that sit on the same physical curb in
-// Stockholm (ptillaten + servicedagar + sometimes prorelsehindrad)
-// without bleeding across to the opposite curb on a normal street
-// (~14 m wide).
+// Strict-mode road-segment resolution uses a two-step anchor approach
+// rather than a flat "all rules within X meters" radius.
 //
-// Trade-off: on very narrow streets (Gamla Stan alleys, ~4-5 m wide)
-// this can pick up rules from both curbs. Acceptable for v1 — those
-// streets rarely have parking anyway. If it becomes a problem, swap
-// in directional matching using rs.direction + the user's heading.
-const strictSegmentRadiusM = 5.0
+// Step 1: find the nearest rule-bearing road_segment to the query
+// point, within strictAnchorSearchM meters. Acts as a sanity bound —
+// if the user is more than ~30m from any rule-bearing segment, they
+// aren't at a parking spot (they're inside a building, in a park, or
+// at unmapped infrastructure) so we return nothing.
+//
+// Step 2: return all rules from segments within strictCoLocatedM
+// meters of that anchor segment. Captures multiple overlapping
+// föreskrifter that sit on the same physical curb in Stockholm
+// (ptillaten + servicedagar + sometimes prorelsehindrad or pbuss
+// when a reserved-class bay is carved into a general paid strip).
+//
+// Why this beats a flat radius:
+//
+//   - Phone GPS in dense urban environments has ±5-10m horizontal
+//     error (urban canyon multipath). Stockholm road_segment
+//     geometries trace the road center-line, not the curb, so a
+//     user standing at the curb of a 12-15m wide street is already
+//     6-7m from the line. A flat 5m radius silently drops these
+//     valid hits (observed at Olof Palmes gata / Kungsbron).
+//
+//   - A flat radius wide enough to catch the offset case (~12-15m)
+//     starts bleeding across normal-width streets. The anchor
+//     approach naturally hugs the one road the user is at,
+//     regardless of GPS offset.
+//
+//   - Co-located rules still surface: a 2m radius around the anchor
+//     captures the reserved-class bay that overlaps the general
+//     paid strip without admitting unrelated rules from across the
+//     street.
+const (
+	strictAnchorSearchM = 30.0
+	strictCoLocatedM    = 2.0
+)
 
 // RulesAt is the strict-mode counterpart to RulesNearby. It returns
 // only rules that legally apply to the exact position:
-//   - road_segment: all segments within strictSegmentRadiusM metres
-//     (≈ "this exact spot", typically 5 m)
+//   - road_segment: two-step anchor — nearest rule-bearing segment
+//     within strictAnchorSearchM, then all co-located rules within
+//     strictCoLocatedM of the anchor. See comment on
+//     sqlRulesByRoadSegmentStrict for the rationale.
 //   - zone: ST_Contains (point inside the polygon)
 //   - parking_area: ST_Contains
 //   - POI: rules within their declared offset extent (no extra
@@ -132,26 +158,27 @@ const strictSegmentRadiusM = 5.0
 // Implements engine.StrictRuleSource. The engine calls this only when
 // the client requested Mode=strict.
 func (s *Store) RulesAt(ctx context.Context, pos domain.Coordinate) ([]domain.Rule, error) {
-	// All four queries take ($1=lng, $2=lat, $3=radius). For the
-	// road-segment query, $3 is the strict tolerance. For the
-	// others, $3=0 leaves only the per-rule offset extent
-	// contributing to distance — i.e. true containment for polygons,
-	// offset-only for POIs.
+	// Zone, parking-area, and POI queries share a (lng, lat, radius)
+	// shape — passing radius=0 leaves only the per-rule offset extent
+	// contributing to distance (true containment for polygons,
+	// offset-only for POIs). The strict road-segment query is
+	// structurally different: it takes (lng, lat, anchor_bound,
+	// co_located_radius) for the two-step anchor approach.
 	type fetch struct {
-		sql    string
-		radius float64
+		sql  string
+		args []any
 	}
 	fetches := []fetch{
-		{sqlRulesByZone, 0},
-		{sqlRulesByParkingArea, 0},
-		{sqlRulesByRoadSegmentStrict, strictSegmentRadiusM},
-		{sqlRulesByPOI, 0},
+		{sqlRulesByZone, []any{pos.Lng, pos.Lat, 0.0}},
+		{sqlRulesByParkingArea, []any{pos.Lng, pos.Lat, 0.0}},
+		{sqlRulesByRoadSegmentStrict, []any{pos.Lng, pos.Lat, strictAnchorSearchM, strictCoLocatedM}},
+		{sqlRulesByPOI, []any{pos.Lng, pos.Lat, 0.0}},
 	}
 
 	seen := map[string]int{}
 	var rules []domain.Rule
 	for _, f := range fetches {
-		rs, err := s.fetchRules(ctx, f.sql, pos.Lng, pos.Lat, f.radius)
+		rs, err := s.fetchRules(ctx, f.sql, f.args...)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: rules-at: %w", err)
 		}
@@ -178,8 +205,8 @@ func (s *Store) RulesAt(ctx context.Context, pos domain.Coordinate) ([]domain.Ru
 	return rules, nil
 }
 
-func (s *Store) fetchRules(ctx context.Context, query string, lng, lat, radius float64) ([]domain.Rule, error) {
-	rows, err := s.pool.Query(ctx, query, lng, lat, radius)
+func (s *Store) fetchRules(ctx context.Context, query string, args ...any) ([]domain.Rule, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

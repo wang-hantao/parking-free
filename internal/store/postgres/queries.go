@@ -77,44 +77,68 @@ WHERE a.target_kind = 'road_segment'
   )`
 
 // sqlRulesByRoadSegmentStrict implements strict mode for road-segment
-// rules: identical to sqlRulesByRoadSegment but called with a much
-// tighter radius (~5 m) so "this exact spot" is what's returned.
+// rules via a two-step anchor approach (Option 2 below).
 //
-// History: an earlier version of strict mode used a CTE that picked
-// the single geometrically nearest road_segment via "ORDER BY <-> LIMIT 1"
-// and then joined rules to it. That had two problems:
+// Evolution:
 //
-//  1. The CTE didn't filter to segments with rules. If a ghost
-//     segment (no rule_applies_to entry, or one whose regulation
-//     has effective_to in the past) was geometrically closer than
-//     the real rule's segment, the JOIN produced zero rows and the
-//     verdict came back empty.
+//	v1: a CTE picked the single geometrically nearest road_segment
+//	via "ORDER BY <-> LIMIT 1" then joined rules to it. The CTE
+//	didn't filter to rule-bearing segments — orphan ghost segments
+//	could win and produce empty verdicts. Also returned only one
+//	segment's rules, missing overlapping föreskrifter on the same
+//	curb.
 //
-//  2. It returned rules from only ONE segment. Stockholm spots
-//     typically have multiple overlapping föreskrifter (ptillaten +
-//     servicedagar + sometimes prorelsehindrad) — strict mode
-//     should return all of them, not pick one.
+//	v2: flat radius query joining rules through rule_applies_to.
+//	Fixed the orphan trap and captured overlaps, but the radius
+//	was a coarse knob — too tight (5m) silently dropped valid hits
+//	in central Stockholm (observed at Olof Palmes gata where a user
+//	8-10m from the road center-line geometry got no rules), too
+//	wide (15m+) bled rules from across normal-width streets.
 //
-// This radius-based query joins through rule_applies_to first, so
-// ghost segments are filtered out for free, and it returns every
-// rule whose segment is within $3 metres of the query point.
+//	v3 (this version): two-step anchor.
+//
+//	  Step 1 — anchor: find the nearest road_segment that has
+//	  rule_applies_to entries, within the strictAnchorSearchM
+//	  sanity bound. Filtering to rule-bearing segments avoids the
+//	  orphan-ghost trap. The bound ensures we return nothing for
+//	  true off-road locations (inside buildings, parks).
+//
+//	  Step 2 — co-located: return all rules from segments within
+//	  strictCoLocatedM meters of the anchor. Captures the disabled
+//	  bay carved into a paid strip, the bus stop overlapping a
+//	  truck-loading zone, etc. The radius is around the anchor
+//	  SEGMENT, not the query point, so GPS offset doesn't matter
+//	  once the anchor is locked.
+//
+// Parameters: $1=lng, $2=lat, $3=anchor search bound (e.g. 30m),
+// $4=co-located radius (e.g. 2m).
 const sqlRulesByRoadSegmentStrict = `
+WITH point AS (
+    SELECT ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS g
+),
+anchor AS (
+    SELECT rs.id, rs.geom
+    FROM road_segment rs
+    JOIN point p ON ST_DWithin(rs.geom::geography, p.g, $3)
+    WHERE EXISTS (
+        SELECT 1 FROM rule_applies_to a
+        WHERE a.target_id = rs.id
+          AND a.target_kind = 'road_segment'
+    )
+    ORDER BY rs.geom::geography <-> (SELECT g FROM point)
+    LIMIT 1
+)
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        r.needs_payment, r.needs_permit, r.vehicle_classes, r.priority,
        reg.source_system, COALESCE(reg.source_reference, ''),
        COALESCE(r.tariff_class_code, ''),
        COALESCE(r.required_permit_kind, '')
-FROM rule r
-JOIN rule_applies_to a ON a.rule_id = r.id
+FROM anchor anc
+JOIN road_segment rs ON ST_DWithin(rs.geom::geography, anc.geom::geography, $4)
+JOIN rule_applies_to a ON a.target_id = rs.id AND a.target_kind = 'road_segment'
+JOIN rule r ON r.id = a.rule_id
 JOIN regulation reg ON reg.id = r.regulation_id
-JOIN road_segment rs ON rs.id = a.target_id
-WHERE a.target_kind = 'road_segment'
-  AND (reg.effective_to IS NULL OR reg.effective_to > NOW())
-  AND ST_DWithin(
-    rs.geom::geography,
-    ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
-    $3 + GREATEST(ABS(a.offset_from_meters), ABS(a.offset_to_meters))
-  )`
+WHERE (reg.effective_to IS NULL OR reg.effective_to > NOW())`
 
 const sqlRulesByPOI = `
 SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
