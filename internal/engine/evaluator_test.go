@@ -489,7 +489,10 @@ func TestEvaluate_ForbidStillWins(t *testing.T) {
 }
 
 func TestEvaluate_NoRulesAtAll_DefaultAllowed(t *testing.T) {
-	// With no rules in scope, default to allowed (nothing forbids).
+	// With no rules in scope, default to allowed (Swedish legal
+	// default — "allowed unless prohibited"). But the summary must
+	// be honest about the data gap; "Parking allowed" implies our
+	// data confirmed permission, which isn't the case.
 	ev := New(&fakeSource{}, NewHolidayCalendarSE())
 	v, _ := ev.Evaluate(context.Background(), Query{
 		Vehicle: domain.Vehicle{Plate: "ABC123", Class: domain.VehicleCar},
@@ -498,8 +501,11 @@ func TestEvaluate_NoRulesAtAll_DefaultAllowed(t *testing.T) {
 	if !v.Allowed {
 		t.Errorf("expected allowed=true with no rules; got false")
 	}
-	if v.Summary != "Parking allowed" {
-		t.Errorf("unexpected summary: %q", v.Summary)
+	if v.DataConfidence != "low" {
+		t.Errorf("expected data_confidence=low with no rules; got %q", v.DataConfidence)
+	}
+	if !containsSubstring(v.Summary, "verify against the on-street sign") {
+		t.Errorf("summary should flag data gap; got %q", v.Summary)
 	}
 }
 
@@ -1372,5 +1378,51 @@ func TestEvaluate_Summary_ClassReservedReportsClasses(t *testing.T) {
 	}
 	if contains([]string{v.Summary}, "require a permit") {
 		t.Errorf("summary should NOT mention permits; got %q", v.Summary)
+	}
+}
+
+func TestEvaluate_DataConfidence_LowWhenNoRules(t *testing.T) {
+	// Coverage gap case: no rules apply at the location. Verdict
+	// defaults to allowed (Swedish legal default), but must mark
+	// data_confidence=low and use an honest summary.
+	src := &fakeSource{rules: []domain.Rule{}}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      atUTC(2026, 5, 7, 12, 0),
+	})
+	if !v.Allowed {
+		t.Errorf("default should be allowed when no rules match")
+	}
+	if v.DataConfidence != "low" {
+		t.Errorf("DataConfidence: want 'low', got %q", v.DataConfidence)
+	}
+	if !containsSubstring(v.Summary, "verify against the on-street sign") {
+		t.Errorf("summary should flag data gap; got %q", v.Summary)
+	}
+	if containsSubstring(v.Summary, "Parking allowed") {
+		t.Errorf("summary should NOT claim 'Parking allowed' with no data; got %q", v.Summary)
+	}
+}
+
+func TestEvaluate_DataConfidence_HighWhenRulesApply(t *testing.T) {
+	// Normal case: rules apply, confidence is high, no gap message.
+	now := atUTC(2026, 5, 7, 12, 0)
+	src := &fakeSource{
+		rules: []domain.Rule{
+			{
+				ID: "paid", Kind: domain.RuleAllow, NeedsPayment: true,
+				Priority:    5,
+				TimeWindows: []domain.TimeWindow{{WeekdayMask: allWeekdays, StartMin: 0, EndMin: 1440}},
+			},
+		},
+	}
+	ev := New(src, NewHolidayCalendarSE())
+	v, _ := ev.Evaluate(context.Background(), Query{
+		Vehicle: domain.Vehicle{Plate: "ABC", Class: domain.VehicleCar},
+		At:      now,
+	})
+	if v.DataConfidence != "high" {
+		t.Errorf("DataConfidence: want 'high' when rules apply, got %q", v.DataConfidence)
 	}
 }

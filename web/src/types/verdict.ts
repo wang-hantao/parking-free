@@ -144,6 +144,10 @@ export interface Verdict {
   expires_at: string;
   reasons: Reason[];
   needs_action?: NeedsAction[];
+  // "high" when ≥1 rule applies; "low" when no rules were found at
+  // the location (verdict defaults to allowed per Swedish legal
+  // default, but the user should verify against on-street signage).
+  data_confidence?: "high" | "low";
   location?: LocationInfo;
   pricing?: PricingInfo;
   constraints?: Constraints;

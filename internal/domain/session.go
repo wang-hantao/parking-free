@@ -31,6 +31,21 @@ type Verdict struct {
 	Reasons     []Reason  `json:"reasons"`                // contributing rules, supportive and contrary
 	NeedsAction []string  `json:"needs_action,omitempty"` // e.g. ["pay_via_app", "show_disc"]
 
+	// DataConfidence reports how grounded the verdict is in our
+	// ingested data. Empty when omitted. Values:
+	//
+	//   "high" — one or more rules apply at this location and the
+	//   verdict is computed from them. The summary reflects the rule
+	//   outcome.
+	//
+	//   "low"  — we have no rules at this location. The Allowed flag
+	//   defaults to true (Sweden's legal default is "allowed unless
+	//   prohibited"), but the user should verify against on-street
+	//   signage. Set when the rule set is empty AND no nearby
+	//   road_segment exists in our data — i.e. genuine coverage gap,
+	//   not just a quiet stretch of curb.
+	DataConfidence string `json:"data_confidence,omitempty"`
+
 	// Enrichment.
 	Location      *LocationInfo `json:"location,omitempty"`
 	Pricing       *PricingInfo  `json:"pricing,omitempty"`

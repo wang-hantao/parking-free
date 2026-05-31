@@ -362,6 +362,18 @@ func (e *Evaluator) Evaluate(ctx context.Context, q Query) (domain.Verdict, erro
 	verdict.Summary = computeSummary(verdict.Allowed, forbidFired, verdict.NeedsAction, blockingClasses)
 	verdict.Reasons = dedupeReasonsByCitation(verdict.Reasons)
 
+	// Confidence stamp: when no rules apply, the default
+	// "allowed" verdict reflects Sweden's legal default ("allowed
+	// unless prohibited"), not actual data — the user should verify
+	// the on-street sign. Surface this explicitly rather than letting
+	// "Parking allowed" + empty reasons mislead.
+	if len(verdict.Reasons) == 0 && !forbidFired {
+		verdict.DataConfidence = "low"
+		verdict.Summary = "No parking regulations on file for this exact location — verify against the on-street sign"
+	} else {
+		verdict.DataConfidence = "high"
+	}
+
 	// Stamp the effective query mode before enrichment so clients can
 	// detect strict-mode fallback (requested strict, got nearby).
 	verdict.Metadata = &domain.Metadata{Mode: string(effectiveMode)}

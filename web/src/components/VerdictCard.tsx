@@ -14,10 +14,24 @@ interface VerdictCardProps {
 }
 
 export function VerdictCard({ verdict }: VerdictCardProps) {
-  const tone = verdict.allowed ? "allowed" : "forbidden";
+  // tone reflects the verdict outcome PLUS data quality. When we
+  // have no rules at the location, we don't paint the card green —
+  // the user needs to know they're operating on Sweden's legal
+  // default, not on confirmed data.
+  const tone: "allowed" | "forbidden" | "unknown" =
+    verdict.data_confidence === "low"
+      ? "unknown"
+      : verdict.allowed
+        ? "allowed"
+        : "forbidden";
   return (
     <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-      <Header allowed={verdict.allowed} summary={verdict.summary} tone={tone} />
+      <Header
+        allowed={verdict.allowed}
+        summary={verdict.summary}
+        tone={tone}
+        confidence={verdict.data_confidence}
+      />
 
       {verdict.location && (
         <div className="mt-3 text-sm text-slate-600">
@@ -72,26 +86,55 @@ function Header({
   allowed,
   summary,
   tone,
+  confidence,
 }: {
   allowed: boolean;
   summary?: string;
-  tone: "allowed" | "forbidden";
+  tone: "allowed" | "forbidden" | "unknown";
+  confidence?: "high" | "low";
 }) {
-  const ring = tone === "allowed" ? "ring-allowed-500" : "ring-forbidden-500";
-  const bg = tone === "allowed" ? "bg-allowed-50" : "bg-forbidden-50";
-  const text = tone === "allowed" ? "text-allowed-700" : "text-forbidden-700";
+  const ring =
+    tone === "allowed"
+      ? "ring-allowed-500"
+      : tone === "forbidden"
+        ? "ring-forbidden-500"
+        : "ring-slate-300";
+  const bg =
+    tone === "allowed"
+      ? "bg-allowed-50"
+      : tone === "forbidden"
+        ? "bg-forbidden-50"
+        : "bg-slate-50";
+  const text =
+    tone === "allowed"
+      ? "text-allowed-700"
+      : tone === "forbidden"
+        ? "text-forbidden-700"
+        : "text-slate-700";
+  const dot =
+    tone === "allowed"
+      ? "bg-allowed-500"
+      : tone === "forbidden"
+        ? "bg-forbidden-500"
+        : "bg-slate-400";
+  const headline =
+    tone === "unknown"
+      ? "No data for this exact location"
+      : allowed
+        ? "Parking allowed"
+        : "Parking not allowed";
   return (
     <div className={`flex items-start gap-3 rounded-lg ${bg} px-3 py-2 ring-1 ${ring}`}>
-      <div
-        className={`mt-0.5 h-2.5 w-2.5 flex-none rounded-full ${
-          allowed ? "bg-allowed-500" : "bg-forbidden-500"
-        }`}
-        aria-hidden
-      />
-      <div>
-        <p className={`text-sm font-semibold ${text}`}>
-          {allowed ? "Parking allowed" : "Parking not allowed"}
-        </p>
+      <div className={`mt-0.5 h-2.5 w-2.5 flex-none rounded-full ${dot}`} aria-hidden />
+      <div className="flex-1">
+        <div className="flex items-center gap-2">
+          <p className={`text-sm font-semibold ${text}`}>{headline}</p>
+          {confidence === "low" && (
+            <span className="rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-600">
+              low confidence
+            </span>
+          )}
+        </div>
         {summary && <p className="mt-0.5 text-sm text-slate-700">{summary}</p>}
       </div>
     </div>
