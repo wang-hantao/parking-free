@@ -106,18 +106,21 @@ The `mode` query parameter selects how rules are resolved:
 - `mode=nearby` (default): rules within `radius` metres (50m default).
   Returns wider context — useful for "what's around here" views.
 - `mode=strict`: rules that legally apply to the exact point. For
-  road-segment rules, uses a two-step anchor: (1) find the nearest
-  rule-bearing road_segment within 30m, (2) return all rules from
-  segments within 2m of that anchor. The anchor step handles GPS
-  offset gracefully — phone GPS in urban canyons can drift 5-10m
-  and road geometries trace the center-line, so a user at the curb
-  is naturally several meters off. The 2m co-located radius
-  captures multiple overlapping föreskrifter on the same curb (a
-  disabled bay carved into a paid strip, a bus stop overlapping a
-  loading zone) without bleeding rules from across the street.
-  Zones, parking-areas, and POIs use ST_Contains / offset semantics
-  as before. Use this mode for "can I park exactly here right
-  now?". The response's `metadata.mode` reports the effective mode.
+  road-segment rules, uses a two-step anchor + same-street fallback:
+  (1) find the nearest rule-bearing road_segment within 30m,
+  (2) return all rules from segments within 8m of that anchor,
+  (3) plus rules from segments with the same `street_name` as the
+  anchor, within 50m of the GPS point. Step 1 handles GPS offset.
+  Step 2 captures multiple overlapping föreskrifter on the same
+  curb (a disabled bay carved into a paid strip, a bus stop
+  overlapping a loading zone). Step 3 picks up the broader
+  street-level context — a general paid-parking feature for the
+  whole street that doesn't physically overlap any specific bay.
+  Street-name matching prevents step 3 from bleeding across to
+  perpendicular streets. Zones, parking-areas, and POIs use
+  ST_Contains / offset semantics as before. Use this mode for
+  "can I park exactly here right now?". The response's
+  `metadata.mode` reports the effective mode.
 
 When multiple Allow rules apply at the same location (common in
 strict mode where ptillaten + servicedagar + a reserved-class spot

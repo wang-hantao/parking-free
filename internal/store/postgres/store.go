@@ -154,6 +154,19 @@ const (
 	// ≥6-7m beyond our 8m reach, since the anchor is along ONE
 	// curb's center-line, not the road center).
 	strictCoLocatedM = 8.0
+	// strictSameStreetM is the third resolution path: rules from
+	// segments on the same street as the anchor, within this radius
+	// of the GPS point. Observed gap on Gamla Brogatan: the general
+	// ptillaten feature for the whole street sat >8m from any one
+	// reserved bay, so the co-located radius missed it. Including
+	// same-street rules within 50m of GPS captures the broader
+	// street context — a paid-parking feature that runs through but
+	// doesn't physically overlap the bay. Street_name matching
+	// prevents cross-street bleed: a perpendicular street within
+	// 50m has a different name and gets filtered out. 50m matches
+	// roughly half a typical Stockholm city block, enough to catch
+	// the relevant features without reaching to the next block.
+	strictSameStreetM = 50.0
 )
 
 // RulesAt is the strict-mode counterpart to RulesNearby. It returns
@@ -183,7 +196,7 @@ func (s *Store) RulesAt(ctx context.Context, pos domain.Coordinate) ([]domain.Ru
 	fetches := []fetch{
 		{sqlRulesByZone, []any{pos.Lng, pos.Lat, 0.0}},
 		{sqlRulesByParkingArea, []any{pos.Lng, pos.Lat, 0.0}},
-		{sqlRulesByRoadSegmentStrict, []any{pos.Lng, pos.Lat, strictAnchorSearchM, strictCoLocatedM}},
+		{sqlRulesByRoadSegmentStrict, []any{pos.Lng, pos.Lat, strictAnchorSearchM, strictCoLocatedM, strictSameStreetM}},
 		{sqlRulesByPOI, []any{pos.Lng, pos.Lat, 0.0}},
 	}
 

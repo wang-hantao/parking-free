@@ -803,3 +803,105 @@ func TestRulesAt_IgnoresOrphanSegmentsAsAnchor(t *testing.T) {
 		t.Errorf("want 1 rule (anchor must skip orphan), got %d", len(rules))
 	}
 }
+
+// seedRoadSegmentWithStreet inserts a segment with explicit street_name
+// distinct from source_reference. Needed for tests that exercise the
+// same-street matching path in strict mode.
+func seedRoadSegmentWithStreet(t *testing.T, st *Store, lng, lat float64, ref, street string) string {
+	t.Helper()
+	const q = `
+		INSERT INTO road_segment (street_name, municipality, source_system, source_reference, geom)
+		VALUES ($1, 'Stockholm', 'stockholm.ltf-tolken', $2,
+			ST_GeomFromText('LINESTRING(' || ($3 - 0.0001) || ' ' || $4 || ',' || ($3 + 0.0001) || ' ' || $4 || ')', 4326))
+		RETURNING id::text`
+	var id string
+	if err := st.pool.QueryRow(context.Background(), q, street, ref, lng, lat).Scan(&id); err != nil {
+		t.Fatalf("seed segment %s: %v", ref, err)
+	}
+	return id
+}
+
+func TestRulesAt_SameStreetCapturesDistantRule(t *testing.T) {
+	// Real-world scenario: Gamla Brogatan has reserved bays (the
+	// anchor) plus a general paid-parking feature ~15m away on the
+	// same street. The 8m co-located radius can't reach 15m, but
+	// the same-street path catches it.
+	st, ctx := openTestStore(t)
+
+	// Reserved bay 5m east of GPS, on Gamla Brogatan
+	bayID := seedRoadSegmentWithStreet(t, st,
+		18.05947+0.00009, 59.33568,
+		"ptillaten/bay/1", "Gamla Brogatan")
+	seedRuleOnSegment(t, st, bayID, "bay-cite", domain.RuleAllow, 20)
+
+	// General paid parking 15m east of GPS, same street — past the
+	// co-located radius but within the same-street radius
+	generalID := seedRoadSegmentWithStreet(t, st,
+		18.05947+0.00027, 59.33568,
+		"ptillaten/general/1", "Gamla Brogatan")
+	seedRuleOnSegment(t, st, generalID, "general-cite", domain.RuleAllow, 5)
+
+	rules, err := st.RulesAt(ctx, domain.Coordinate{Lat: 59.33568, Lng: 18.05947})
+	if err != nil {
+		t.Fatalf("rules-at: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Errorf("want 2 rules (bay anchor + same-street general), got %d", len(rules))
+	}
+}
+
+func TestRulesAt_SameStreetDoesNotBleedAcrossStreets(t *testing.T) {
+	// Sanity: a feature 30m away on a DIFFERENT street is excluded
+	// by the street_name filter, even though it's within the 50m
+	// same-street radius.
+	st, ctx := openTestStore(t)
+
+	// Anchor on Gamla Brogatan, 5m east
+	anchorID := seedRoadSegmentWithStreet(t, st,
+		18.05947+0.00009, 59.33568,
+		"ptillaten/anchor/1", "Gamla Brogatan")
+	seedRuleOnSegment(t, st, anchorID, "anchor-cite", domain.RuleAllow, 5)
+
+	// Different street, 30m away. Within the same-street radius
+	// distance-wise but excluded by name.
+	otherID := seedRoadSegmentWithStreet(t, st,
+		18.05947+0.00054, 59.33568,
+		"ptillaten/other/1", "Mäster Samuelsgatan")
+	seedRuleOnSegment(t, st, otherID, "other-cite", domain.RuleAllow, 5)
+
+	rules, err := st.RulesAt(ctx, domain.Coordinate{Lat: 59.33568, Lng: 18.05947})
+	if err != nil {
+		t.Fatalf("rules-at: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Errorf("want 1 rule (anchor only, other street excluded), got %d", len(rules))
+	}
+}
+
+func TestRulesAt_SameStreetWithEmptyStreetNameFallsBackToCoLocated(t *testing.T) {
+	// Edge case: anchor has empty street_name. The same-street path
+	// must be disabled (otherwise it would match every road_segment
+	// with empty street_name as "same street"). Falls back to the
+	// co-located path alone — distant features stay excluded.
+	st, ctx := openTestStore(t)
+
+	// Anchor with empty street_name, 5m east
+	anchorID := seedRoadSegmentWithStreet(t, st,
+		18.05947+0.00009, 59.33568,
+		"ptillaten/anchor/1", "")
+	seedRuleOnSegment(t, st, anchorID, "anchor-cite", domain.RuleAllow, 5)
+
+	// Distant feature also with empty street_name, 30m away
+	distantID := seedRoadSegmentWithStreet(t, st,
+		18.05947+0.00054, 59.33568,
+		"ptillaten/distant/1", "")
+	seedRuleOnSegment(t, st, distantID, "distant-cite", domain.RuleAllow, 5)
+
+	rules, err := st.RulesAt(ctx, domain.Coordinate{Lat: 59.33568, Lng: 18.05947})
+	if err != nil {
+		t.Fatalf("rules-at: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Errorf("want 1 rule (anchor only, empty street_name doesn't enable same-street), got %d", len(rules))
+	}
+}

@@ -111,13 +111,33 @@ WHERE a.target_kind = 'road_segment'
 //	  once the anchor is locked.
 //
 // Parameters: $1=lng, $2=lat, $3=anchor search bound (e.g. 30m),
-// $4=co-located radius (e.g. 2m).
+// $4=co-located radius (e.g. 8m), $5=same-street radius (e.g. 50m).
+//
+// Resolution paths (logical OR — a rule matches if any path admits it):
+//
+//	A. Within $4 meters of the anchor SEGMENT geometry. Catches the
+//	   tightly-overlapping case: a disabled bay carved into a paid
+//	   strip, multiple reserved bays sharing a curb section.
+//
+//	B. Same street_name as the anchor AND within $5 meters of the
+//	   query POINT. Catches the longer-range "this is a paid street"
+//	   case observed at Gamla Brogatan: the general ptillaten
+//	   feature for the whole street sits >8m away from any one
+//	   reserved bay, but it's on the same street, near the user.
+//	   Street_name matching prevents bleeding to a different street
+//	   within $5m (a perpendicular street at a junction has a
+//	   different name).
+//
+// The two paths combine cleanly: cross-street reserved bays right at
+// the anchor (case A) plus same-street general parking somewhat further
+// away (case B). Empty street_name on the anchor disables path B and
+// falls back to path A alone.
 const sqlRulesByRoadSegmentStrict = `
 WITH point AS (
     SELECT ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS g
 ),
 anchor AS (
-    SELECT rs.id, rs.geom
+    SELECT rs.id, rs.geom, COALESCE(rs.street_name, '') AS street_name
     FROM road_segment rs
     JOIN point p ON ST_DWithin(rs.geom::geography, p.g, $3)
     WHERE EXISTS (
@@ -134,7 +154,15 @@ SELECT DISTINCT r.id::text, r.regulation_id::text, r.kind, r.max_duration_s,
        COALESCE(r.tariff_class_code, ''),
        COALESCE(r.required_permit_kind, '')
 FROM anchor anc
-JOIN road_segment rs ON ST_DWithin(rs.geom::geography, anc.geom::geography, $4)
+CROSS JOIN point p
+JOIN road_segment rs ON (
+    ST_DWithin(rs.geom::geography, anc.geom::geography, $4)
+    OR (
+        anc.street_name <> ''
+        AND COALESCE(rs.street_name, '') = anc.street_name
+        AND ST_DWithin(rs.geom::geography, p.g, $5)
+    )
+)
 JOIN rule_applies_to a ON a.target_id = rs.id AND a.target_kind = 'road_segment'
 JOIN rule r ON r.id = a.rule_id
 JOIN regulation reg ON reg.id = r.regulation_id
